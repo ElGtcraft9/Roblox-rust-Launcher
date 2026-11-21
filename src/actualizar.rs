@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use minisign_verify::{PublicKey, Signature};
 use serde_json::Value;
 
-pub const REPOSITORIO: &str = "iker11094-cmyk/Roblox-rust-Launcher";
+pub const REPOSITORIO: &str = "ElGtcraft9/Roblox-rust-Launcher";
 
 /// Clave pública de firma (`herramientas/minisign.pub`).
 const CLAVE_PUBLICA: &str = "RWT4XCk0ZhR7fDVZ0FmaixOKiHwyUAdqzRWcrm5+Pd9lGtyogm84s1UT";

@@ -17,7 +17,7 @@ Funciona en **Windows** (con el cliente oficial de Roblox) y en **Linux**
 ## Descargar
 
 Descarga el ejecutable de tu sistema desde la
-[última versión](https://github.com/iker11094-cmyk/Roblox-rust-Launcher/releases/latest):
+[última versión](https://github.com/ElGtcraft9/Roblox-rust-Launcher/releases/latest):
 
 - **Windows:** `RustLauncher-windows.exe`. Como aún no está firmado con un
   certificado de Windows, SmartScreen avisará de «editor desconocido»: pulsa
