@@ -79,6 +79,8 @@ pub struct Config {
     pub version: u32,
     /// Cerrar Roblox al salir de una experiencia y volver al launcher.
     pub cerrar_al_salir: bool,
+    /// Buscar e instalar solo las versiones nuevas del launcher.
+    pub actualizar_launcher: bool,
 }
 
 impl Default for Config {
@@ -95,6 +97,7 @@ impl Default for Config {
             modo: Modo::Pc,
             version: VERSION_CONFIG,
             cerrar_al_salir: true,
+            actualizar_launcher: true,
         }
     }
 }

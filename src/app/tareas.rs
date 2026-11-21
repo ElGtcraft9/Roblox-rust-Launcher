@@ -491,6 +491,7 @@ impl App {
                 Msg::Inventario(c, r) => {
                     self.inventario.insert(c, Carga::de(r));
                 }
+                Msg::Actualizacion(e) => self.actualizacion = e,
                 Msg::Amigos(r) => self.amigos = Carga::de(r),
                 Msg::Descripcion(r) => self.descripcion = Carga::de(r),
                 Msg::CambioAvatar(r) => {

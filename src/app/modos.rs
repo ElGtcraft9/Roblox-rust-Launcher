@@ -60,6 +60,51 @@ impl App {
         }
     }
 
+    /// Busca versiones nuevas del launcher unos segundos después de abrirlo y
+    /// después cada 6 horas. En compilaciones de desarrollo no lo hace (salvo
+    /// con RUST_LAUNCHER_ACTUALIZAR), para no reemplazar el ejecutable de pruebas.
+    pub(super) fn actualizar_solo(&mut self, ctx: &egui::Context) {
+        let permitido = !cfg!(debug_assertions) || std::env::var_os("RUST_LAUNCHER_ACTUALIZAR").is_some();
+        if !permitido || !self.cfg.actualizar_launcher || self.cerrar_tras_lanzar || crate::perfil::activo() {
+            return;
+        }
+        let espera = match self.ultima_busqueda {
+            None => Duration::from_secs(4).saturating_sub(self.arranque.elapsed()),
+            Some(t) => Duration::from_secs(6 * 3600).saturating_sub(t.elapsed()),
+        };
+        if espera.is_zero() {
+            self.buscar_actualizacion();
+        } else {
+            ctx.request_repaint_after(espera);
+        }
+    }
+
+    pub(super) fn buscar_actualizacion(&mut self) {
+        if matches!(
+            self.actualizacion,
+            EstadoActualizacion::Buscando | EstadoActualizacion::Descargando(_) | EstadoActualizacion::Lista(_)
+        ) {
+            return;
+        }
+        self.ultima_busqueda = Some(Instant::now());
+        self.actualizacion = EstadoActualizacion::Buscando;
+        let (http, tx) = (self.http.clone(), self.tx.clone());
+        self.rt.spawn(async move {
+            let estado = match crate::actualizar::buscar(&http).await {
+                Ok(None) => EstadoActualizacion::AlDia,
+                Ok(Some(v)) => {
+                    tx.enviar(Msg::Actualizacion(EstadoActualizacion::Descargando(v.numero.clone())));
+                    match crate::actualizar::instalar(&http, &v).await {
+                        Ok(()) => EstadoActualizacion::Lista(v.numero),
+                        Err(e) => EstadoActualizacion::Error(texto_error(e)),
+                    }
+                }
+                Err(e) => EstadoActualizacion::Error(texto_error(e)),
+            };
+            tx.enviar(Msg::Actualizacion(estado));
+        });
+    }
+
     /// Progreso (0 a 1, con desaceleración) de la transición entre vistas.
     /// Detecta solo los cambios de pestaña y la apertura de «Más información».
     pub(super) fn transicion(&mut self) -> f32 {

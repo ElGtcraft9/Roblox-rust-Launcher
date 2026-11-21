@@ -19,7 +19,7 @@ impl App {
         if plataforma::ACTUALIZA_CLIENTE {
             launcher.push(Ajuste::Fondo);
         }
-        launcher.extend([Ajuste::Enlaces, Ajuste::BorrarImagenes]);
+        launcher.extend([Ajuste::Enlaces, Ajuste::BorrarImagenes, Ajuste::ActualizarAuto, Ajuste::BuscarActualizacion]);
         let mut cuenta = Vec::new();
         cuenta.push(if self.sesion.is_some() { Ajuste::CerrarSesion } else { Ajuste::IniciarSesion });
         cuenta.extend([
@@ -125,6 +125,23 @@ impl App {
                 si_no(self.enlaces_web),
             ),
             Ajuste::BorrarImagenes => ("Imágenes guardadas".into(), "Miniaturas guardadas para abrir más rápido.".into(), "Borrar".into()),
+            Ajuste::ActualizarAuto => (
+                "Actualizar RustLauncher automáticamente".into(),
+                "Solo se instalan versiones firmadas por el autor; la nueva se usa al reiniciar.".into(),
+                si_no(self.cfg.actualizar_launcher),
+            ),
+            Ajuste::BuscarActualizacion => {
+                let actual = crate::actualizar::VERSION_ACTUAL;
+                let (desc, accion) = match &self.actualizacion {
+                    EstadoActualizacion::Nada => (format!("Versión {actual}."), "Buscar actualizaciones"),
+                    EstadoActualizacion::Buscando => (format!("Versión {actual}. Buscando…"), "Buscando…"),
+                    EstadoActualizacion::AlDia => (format!("Versión {actual}: es la última."), "Buscar de nuevo"),
+                    EstadoActualizacion::Descargando(v) => (format!("Descargando la versión {v}…"), "Descargando…"),
+                    EstadoActualizacion::Lista(v) => (format!("Versión {v} instalada. Reinicia para usarla."), "Reiniciar ahora"),
+                    EstadoActualizacion::Error(e) => (format!("No se pudo actualizar: {e}"), "Reintentar"),
+                };
+                ("Versión del launcher".into(), desc, accion.into())
+            }
             Ajuste::CerrarSesion => (
                 "Cerrar sesión".into(),
                 self.sesion.as_ref().map(|s| format!("Sesión iniciada como @{}", s.usuario.nombre)).unwrap_or_default(),
@@ -181,6 +198,16 @@ impl App {
                 }
             }
             Ajuste::BorrarImagenes => self.imgs.borrar_cache(),
+            Ajuste::ActualizarAuto => self.cfg.actualizar_launcher = !self.cfg.actualizar_launcher,
+            Ajuste::BuscarActualizacion => {
+                if matches!(self.actualizacion, EstadoActualizacion::Lista(_)) {
+                    crate::actualizar::reiniciar();
+                }
+                if matches!(self.actualizacion, EstadoActualizacion::AlDia | EstadoActualizacion::Error(_)) {
+                    self.actualizacion = EstadoActualizacion::Nada;
+                }
+                self.buscar_actualizacion();
+            }
             Ajuste::CerrarSesion => self.cerrar_sesion(),
             Ajuste::Web(_, _, url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
         }
@@ -250,7 +277,14 @@ impl App {
                 p.text(Pos2::new(x0, r.center().y - 11.0), Align2::LEFT_CENTER, t, semi(18.0), TEXTO);
                 p.text(Pos2::new(x0, r.center().y + 12.0), Align2::LEFT_CENTER, d, medio(escala::ETIQUETA), TEXTO_2);
                 let selector =
-                    !matches!(a, Ajuste::BorrarImagenes | Ajuste::CerrarSesion | Ajuste::IniciarSesion | Ajuste::Web(..));
+                    !matches!(
+                        a,
+                        Ajuste::BorrarImagenes
+                            | Ajuste::CerrarSesion
+                            | Ajuste::IniciarSesion
+                            | Ajuste::BuscarActualizacion
+                            | Ajuste::Web(..)
+                    );
                 let xd = r.right() - 16.0;
                 if selector {
                     // Selector de consola: ‹ valor ›.

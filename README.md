@@ -14,6 +14,33 @@ Funciona en **Windows** (con el cliente oficial de Roblox) y en **Linux**
 > abre tal cual. Usa APIs web de Roblox que no están documentadas oficialmente y
 > pueden cambiar sin aviso.
 
+## Descargar
+
+Descarga el ejecutable de tu sistema desde la
+[última versión](https://github.com/iker11094-cmyk/Roblox-rust-Launcher/releases/latest):
+
+- **Windows:** `RustLauncher-windows.exe`. Como aún no está firmado con un
+  certificado de Windows, SmartScreen avisará de «editor desconocido»: pulsa
+  *Más información → Ejecutar de todas formas*.
+- **Linux:** `RustLauncher-linux`. Dale permiso de ejecución
+  (`chmod +x RustLauncher-linux`). Necesita [Sober](https://sober.vinegarhq.org/).
+
+## Actualizaciones automáticas
+
+Al abrirse (y cada 6 horas) el launcher consulta la última release de este
+repositorio. Si hay una versión nueva, la descarga, **comprueba su firma** y se
+reemplaza; la nueva versión se usa al reiniciar (*Reiniciar ahora*). Se puede
+desactivar en *Ajustes → Launcher*.
+
+Cada ejecutable de una release va acompañado de su firma `minisign`
+(`.minisig`). El launcher solo se actualiza si la firma es válida para la clave
+pública del proyecto y si nombra esa misma versión y plataforma. La clave
+privada no está en el repositorio. Para comprobar una descarga a mano:
+
+```sh
+minisign -Vm RustLauncher-linux -P RWT4XCk0ZhR7fDVZ0FmaixOKiHwyUAdqzRWcrm5+Pd9lGtyogm84s1UT
+```
+
 ## Qué hace
 
 - **Abre los juegos directamente.** En Windows se salta el lanzador oficial
@@ -70,7 +97,7 @@ Cuenta* si dejas de usar el launcher.
 
 ## Estado
 
-Versión **0.2.0**, en desarrollo.
+Versión **0.3.0**, en desarrollo.
 
 | Parte | Estado |
 |---|---|
@@ -100,6 +127,15 @@ ignoradas y se ejecutan con `cargo test -- --ignored`.
 En Linux hace falta tener Sober instalado:
 `flatpak install flathub org.vinegarhq.Sober`.
 
+## Publicar una versión
+
+1. Sube la versión en `Cargo.toml` y haz commit.
+2. Ejecuta `herramientas/publicar.sh [notas.md]`.
+
+El script compila Windows y Linux, firma ambos ejecutables con la clave privada
+(`~/.config/rustlauncher-firma/minisign.key` o `$RUSTLAUNCHER_CLAVE`), genera
+`SHA256SUMS` y crea la release con `gh`.
+
 ## Estructura
 
 | Archivo | Contenido |
@@ -118,10 +154,13 @@ En Linux hace falta tener Sober instalado:
 | `src/vigia.rs` | Lectura del registro del cliente (barra de carga y salida del juego) |
 | `src/imagenes.rs` | Carga de miniaturas con caché en disco |
 | `src/acelerar.rs` | Precarga de archivos y DNS |
+| `src/actualizar.rs` | Actualizaciones automáticas firmadas |
 | `src/teclado.rs` | Teclado en pantalla del modo consola |
 | `src/mando.rs` | Mando de juego |
 | `src/flags.rs` | Ajustes del cliente (fast flags permitidas) |
 | `herramientas/logo.py` | Genera el logo y los iconos |
+| `herramientas/publicar.sh` | Compila, firma y publica una versión |
+| `herramientas/minisign.pub` | Clave pública de firma |
 
 ## Créditos
 

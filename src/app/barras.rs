@@ -111,8 +111,19 @@ impl App {
                 .as_ref()
                 .map(|_| ("No se pudo comprobar si hay actualizaciones".to_string(), ERROR))
         };
-        if let Some((t, c)) = estado {
-            p.text(Pos2::new(pantalla.left() + MARGEN, y), Align2::LEFT_CENTER, t, medio(escala::ETIQUETA), c);
+        let x_aviso = pantalla.left() + MARGEN;
+        if let EstadoActualizacion::Lista(v) = &self.actualizacion {
+            let g = p.layout_no_wrap(format!("RustLauncher {v} instalado."), medio(escala::ETIQUETA), TEXTO);
+            let w = g.size().x;
+            p.galley(Pos2::new(x_aviso, y - g.size().y / 2.0), g, TEXTO);
+            let (r, _) = boton(ui, Pos2::new(x_aviso + w + 12.0, y - 18.0), "Reiniciar ahora", EstiloBoton::Principal, "reiniciar");
+            if r.clicked() {
+                crate::actualizar::reiniciar();
+            }
+        } else if let EstadoActualizacion::Descargando(v) = &self.actualizacion {
+            p.text(Pos2::new(x_aviso, y), Align2::LEFT_CENTER, format!("Descargando RustLauncher {v}…"), medio(escala::ETIQUETA), TEXTO_2);
+        } else if let Some((t, c)) = estado {
+            p.text(Pos2::new(x_aviso, y), Align2::LEFT_CENTER, t, medio(escala::ETIQUETA), c);
         }
 
         // Derecha: pistas de botones, solo en modo consola.

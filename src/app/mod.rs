@@ -78,6 +78,19 @@ pub enum Msg {
     Mensajes(String, Result<Vec<Mensaje>, String>),
     Enviado(Result<(), String>),
     ChatAbierto(Result<(String, String), String>),
+    Actualizacion(EstadoActualizacion),
+}
+
+/// Estado de la actualización del propio launcher.
+#[derive(Clone, PartialEq)]
+pub enum EstadoActualizacion {
+    Nada,
+    Buscando,
+    AlDia,
+    Descargando(String),
+    /// Versión nueva instalada en el disco; se usa al reiniciar.
+    Lista(String),
+    Error(String),
 }
 
 /// Foco en la pantalla del mercado (modo consola).
@@ -193,6 +206,8 @@ enum Ajuste {
     Fondo,
     Enlaces,
     BorrarImagenes,
+    ActualizarAuto,
+    BuscarActualizacion,
     CerrarSesion,
     IniciarSesion,
     Web(&'static str, &'static str, &'static str),
@@ -225,6 +240,8 @@ pub struct App {
     /// Juego enfocado y desde cuándo (para precargar su ficha).
     foco_desde: Option<(u64, Instant)>,
     precargado: bool,
+    actualizacion: EstadoActualizacion,
+    ultima_busqueda: Option<Instant>,
     /// Transición entre pestañas: cuándo empezó y hacia qué lado.
     vista_anterior: (Pestana, bool),
     cambio_vista: Instant,
@@ -357,6 +374,8 @@ impl App {
             rueda: Vec2::ZERO,
             foco_desde: None,
             precargado: false,
+            actualizacion: EstadoActualizacion::Nada,
+            ultima_busqueda: None,
             vista_anterior: (Pestana::Inicio, false),
             cambio_vista: Instant::now() - Duration::from_secs(1),
             dir_vista: 1.0,
@@ -567,6 +586,7 @@ impl eframe::App for App {
         self.capturar(&ctx);
 
         self.aplicar_modo(&ctx);
+        self.actualizar_solo(&ctx);
         self.precargar_pestanas(&ctx);
         self.tras_lanzar(&ctx);
         self.leer_teclado(&ctx);

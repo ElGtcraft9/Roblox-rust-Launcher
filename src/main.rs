@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod acelerar;
+mod actualizar;
 mod api;
 mod app;
 mod config;
@@ -35,6 +36,10 @@ fn main() -> eframe::Result<()> {
         Some("--desinstalar") => {
             let _ = plataforma::registrar(false);
             let _ = std::fs::remove_dir_all(config::base());
+            return Ok(());
+        }
+        Some("--version" | "-V") => {
+            println!("RustLauncher {}", actualizar::VERSION_ACTUAL);
             return Ok(());
         }
         Some("--ayuda" | "--help" | "-h") => {
