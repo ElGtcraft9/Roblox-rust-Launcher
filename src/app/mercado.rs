@@ -98,7 +98,7 @@ impl App {
             let activa = i == self.mercado_cat;
             let g = p.layout_no_wrap(nombre.to_string(), semi(15.0), if activa { TINTA } else { TEXTO });
             let r = Rect::from_min_size(Pos2::new(x, y_chips), Vec2::new(g.size().x + 32.0, 40.0));
-            let resp = ui.interact(r, Id::unique(("categoria", i)), Sense::click());
+            let resp = ui.interact(r, Id::new(("categoria", i)), Sense::click());
             let fondo = if activa { FOCO } else if resp.hovered() { cristal_fuerte() } else { cristal() };
             p.rect_filled(r, 20, fondo);
             p.galley(r.center() - g.size() / 2.0, g, TEXTO);
@@ -120,7 +120,7 @@ impl App {
         let y = y_chips + 40.0 + 28.0;
         let aviso = match &self.mercado {
             Carga::Nada | Carga::Cargando => Some(("Cargando el mercado…".to_string(), TEXTO_2)),
-            Carga::Error(e) => Some((format!("No se pudo cargar el mercado. {e}"), ERROR)),
+            Carga::Error(e) => Some((trf("No se pudo cargar el mercado. {}", &[e]), ERROR)),
             Carga::Listo(l) if l.is_empty() => Some(("No hay artículos que coincidan. Prueba con otras palabras.".to_string(), TEXTO_2)),
             Carga::Listo(_) => None,
         };
@@ -138,7 +138,7 @@ impl App {
         };
         let filas_visibles = (zona.height() / paso.y).floor().max(1.0);
         let objetivo = (fila_foco - filas_visibles + 1.0).max(0.0) * paso.y;
-        let off = ui.ctx().animate_value_with_time(Id::unique("mercado_v"), objetivo, 0.18);
+        let off = ui.ctx().animate_value_with_time(Id::new("mercado_v"), objetivo, 0.18);
         let pc = p.with_clip_rect(zona);
         let movido = raton_movido(ui, self.cfg.modo == Modo::Consola);
         for (i, a) in lista.iter().enumerate() {
@@ -166,7 +166,7 @@ impl App {
                 None => "No está a la venta".to_string(),
             };
             pc.text(Pos2::new(r.left(), r.bottom() + 12.0 + h), Align2::LEFT_TOP, precio, semi(14.0), TEXTO);
-            let resp = ui.interact(r.intersect(zona), Id::unique(("articulo", i)), Sense::click());
+            let resp = ui.interact(r.intersect(zona), Id::new(("articulo", i)), Sense::click());
             if !enfocado && resp.hovered() {
                 resalte(&pc, r);
             }
@@ -193,7 +193,7 @@ impl App {
         let fondo = mezclar(self.tinte_actual(), Color32::WHITE, 0.07);
         let mut cerrar = acciones.contains(&Accion::Volver);
         let mut ver = acciones.contains(&Accion::Aceptar);
-        egui::Area::new(Id::unique("articulo")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
+        egui::Area::new(Id::new("articulo")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
             ui.allocate_rect(pantalla, Sense::click());
             let p = ui.painter().clone();
             p.rect_filled(pantalla, 0, Color32::from_black_alpha(170));
@@ -211,7 +211,7 @@ impl App {
             let h = g.size().y;
             p.galley(Pos2::new(x, y), g, TEXTO);
             y += h + 4.0;
-            p.text(Pos2::new(x, y), Align2::LEFT_TOP, format!("de {}", a.creador), medio(escala::CUERPO), TEXTO_2);
+            p.text(Pos2::new(x, y), Align2::LEFT_TOP, trf("de {}", &[&a.creador]), medio(escala::CUERPO), TEXTO_2);
             y += 34.0;
             let precio = match a.precio {
                 Some(0) => "Gratis".to_string(),

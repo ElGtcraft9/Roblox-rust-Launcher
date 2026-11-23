@@ -72,7 +72,7 @@ impl App {
 
         // Amigos.
         let titulo = match &self.amigos {
-            Carga::Listo(l) => format!("Amigos ({})", l.len()),
+            Carga::Listo(l) => trf("Amigos ({})", &[&l.len()]),
             _ => "Amigos".to_string(),
         };
         p.text(Pos2::new(xa, y), Align2::LEFT_TOP, titulo, estrecha(escala::SECCION), TEXTO);
@@ -84,7 +84,7 @@ impl App {
             }
             Carga::Listo(l) => l.clone(),
             Carga::Error(e) => {
-                let g = galley(ui, &format!("No se pudo cargar la lista. {e}"), cuerpo(escala::CUERPO), ERROR, ancho, 3);
+                let g = galley(ui, &trf("No se pudo cargar la lista. {}", &[e]), cuerpo(escala::CUERPO), ERROR, ancho, 3);
                 p.galley(Pos2::new(xa, y), g, ERROR);
                 return;
             }
@@ -111,7 +111,7 @@ impl App {
                     continue;
                 }
                 let c = Pos2::new(celda.center().x, celda.top() + 44.0);
-                let resp = ui.interact(celda, Id::unique(("amigo", a.id)), Sense::click());
+                let resp = ui.interact(celda, Id::new(("amigo", a.id)), Sense::click());
                 let pp = ui.painter();
                 pp.circle_filled(c, 42.0, if resp.hovered() { cristal_fuerte() } else { cristal() });
                 if let Some(t) = self.imgs.get((TipoImg::Cabeza, a.id)) {

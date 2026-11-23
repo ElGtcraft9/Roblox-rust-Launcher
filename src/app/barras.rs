@@ -57,7 +57,7 @@ impl App {
             let g = p.layout_no_wrap(nombre.to_string(), semi(escala::PESTANA), TEXTO);
             let ancho = g.size().x;
             let r = Rect::from_min_size(Pos2::new(x, y - g.size().y / 2.0), g.size()).expand2(Vec2::new(8.0, 10.0));
-            let resp = ui.interact(r, Id::unique(("pestana", nombre)), Sense::click());
+            let resp = ui.interact(r, Id::new(("pestana", nombre)), Sense::click());
             let color = if activa || resp.hovered() { TEXTO } else { TEXTO_2 };
             p.text(Pos2::new(x, y), Align2::LEFT_CENTER, nombre, semi(escala::PESTANA), color);
             if activa {
@@ -71,8 +71,8 @@ impl App {
 
         if let Some((xs, ws)) = subrayado {
             let ctx = ui.ctx();
-            let xa = ctx.animate_value_with_time(Id::unique("subrayado_x"), xs, 0.22);
-            let wa = ctx.animate_value_with_time(Id::unique("subrayado_w"), ws, 0.22);
+            let xa = ctx.animate_value_with_time(Id::new("subrayado_x"), xs, 0.22);
+            let wa = ctx.animate_value_with_time(Id::new("subrayado_w"), ws, 0.22);
             p.rect_filled(Rect::from_min_size(Pos2::new(xa, y + 16.0), Vec2::new(wa, 3.0)), 1, FOCO);
         }
 
@@ -87,7 +87,7 @@ impl App {
                     .corner_radius(18)
                     .paint_at(ui, r);
             }
-            let resp = ui.interact(r, Id::unique("perfil"), Sense::click());
+            let resp = ui.interact(r, Id::new("perfil"), Sense::click());
             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 self.cambiar_pestana(Pestana::Avatar);
             }
@@ -105,7 +105,7 @@ impl App {
         let estado = if let Some(a) = &self.aviso_cliente {
             Some((a.clone(), ERROR))
         } else if let Some(Progreso::Descargando { hechos, total }) = self.fondo_progreso {
-            Some((format!("Actualizando {}: {hechos} de {total}", plataforma::NOMBRE_CLIENTE), TEXTO_2))
+            Some((trf("Actualizando {}: {} de {}", &[&plataforma::NOMBRE_CLIENTE, &hechos, &total]), TEXTO_2))
         } else {
             self.fondo_error
                 .as_ref()
@@ -113,7 +113,7 @@ impl App {
         };
         let x_aviso = pantalla.left() + MARGEN;
         if let EstadoActualizacion::Lista(v) = &self.actualizacion {
-            let g = p.layout_no_wrap(format!("RustLauncher {v} instalado."), medio(escala::ETIQUETA), TEXTO);
+            let g = p.layout_no_wrap(trf("RustLauncher {} instalado.", &[v]), medio(escala::ETIQUETA), TEXTO);
             let w = g.size().x;
             p.galley(Pos2::new(x_aviso, y - g.size().y / 2.0), g, TEXTO);
             let (r, _) = boton(ui, Pos2::new(x_aviso + w + 12.0, y - 18.0), "Reiniciar ahora", EstiloBoton::Principal, "reiniciar");
@@ -121,7 +121,7 @@ impl App {
                 crate::actualizar::reiniciar();
             }
         } else if let EstadoActualizacion::Descargando(v) = &self.actualizacion {
-            p.text(Pos2::new(x_aviso, y), Align2::LEFT_CENTER, format!("Descargando RustLauncher {v}…"), medio(escala::ETIQUETA), TEXTO_2);
+            p.text(Pos2::new(x_aviso, y), Align2::LEFT_CENTER, trf("Descargando RustLauncher {}…", &[v]), medio(escala::ETIQUETA), TEXTO_2);
         } else if let Some((t, c)) = estado {
             p.text(Pos2::new(x_aviso, y), Align2::LEFT_CENTER, t, medio(escala::ETIQUETA), c);
         }
@@ -142,6 +142,7 @@ impl App {
                 Pestana::Mercado => vec![("A", "Enter", "Abrir")],
                 Pestana::Social => vec![("A", "Enter", "Elegir"), ("Y", "I", "Mensaje")],
                 Pestana::Avatar | Pestana::Perfil => vec![],
+                Pestana::Crear => vec![("A", "Enter", "Abrir")],
             }
         };
         pistas.push(("LB RB", "Q E", "Pestañas"));

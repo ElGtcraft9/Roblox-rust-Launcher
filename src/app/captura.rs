@@ -40,6 +40,11 @@ impl App {
                         self.animacion_consola = Some(Instant::now() + Duration::from_secs_f32(espera - 1.4));
                     }
                     "ajustes" => self.pestana = Pestana::Ajustes,
+                    // Crear: la animación (RUST_LAUNCHER_ESPERA < 2) o el editor.
+                    "crear" => {
+                        self.pestana = Pestana::Crear;
+                        self.taller.pedido = true;
+                    }
                     "lanzando" => {
                         self.fondo_a(994732206);
                         self.lanzamiento = Some(Lanzamiento {
@@ -82,17 +87,26 @@ impl App {
             return;
         }
         if self.fotogramas == u32::MAX {
+            // Esperando la captura pedida.
+            let img = ctx.input(|i| {
+                i.raw.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(img) = img {
+                let [w, h] = img.size;
+                let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) {
+                    let _ = buf.save_with_format(&ruta, image::ImageFormat::Png);
+                }
+                std::process::exit(0);
+            }
+            ctx.request_repaint();
             return;
         }
         self.fotogramas = u32::MAX;
-        ctx.request_screenshot(move |img| {
-            let [w, h] = img.size;
-            let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) {
-                let _ = buf.save_with_format(&ruta, image::ImageFormat::Png);
-            }
-            std::process::exit(0);
-        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         ctx.request_repaint();
     }
 }

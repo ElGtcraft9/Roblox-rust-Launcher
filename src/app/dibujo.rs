@@ -14,7 +14,7 @@ pub(super) fn limpiar(ui: &Ui, texto: &str, fuente: &egui::FontId) -> String {
 }
 
 pub(super) fn galley(ui: &Ui, texto: &str, fuente: egui::FontId, color: Color32, ancho: f32, filas: usize) -> Arc<egui::Galley> {
-    let texto = limpiar(ui, texto, &fuente);
+    let texto = limpiar(ui, crate::idioma::traducir(texto), &fuente);
     let mut job = LayoutJob::single_section(texto, TextFormat::simple(fuente, color));
     job.wrap = TextWrapping {
         max_width: ancho,
@@ -84,7 +84,7 @@ pub(super) enum EstiloBoton {
 pub(super) fn boton(ui: &mut Ui, pos: Pos2, texto: &str, estilo: EstiloBoton, id: &str) -> (egui::Response, f32) {
     let g = ui.painter().layout_no_wrap(texto.to_string(), semi(18.0), TEXTO);
     let r = Rect::from_min_size(pos, Vec2::new(g.size().x + 56.0, 52.0));
-    let resp = ui.interact(r, Id::unique(("boton", id)), Sense::click());
+    let resp = ui.interact(r, Id::new(("boton", id)), Sense::click());
     let (fondo, color) = match estilo {
         EstiloBoton::Principal if resp.hovered() => (Color32::from_gray(225), TINTA),
         EstiloBoton::Principal => (FOCO, TINTA),

@@ -112,6 +112,8 @@ mod tests {
             geometria_reducida: true,
             cielo_gris: true,
             sin_escalado_dpi: true,
+            escalado: crate::config::Escalado::Rendimiento,
+            ..Default::default()
         };
         for (k, _) in flags(&a) {
             assert!(GESTIONADAS.contains(&k), "{k}");

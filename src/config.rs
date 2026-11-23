@@ -45,7 +45,56 @@ pub enum AlJugar {
     Nada,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// `graphics_optimization_mode` de Sober.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OptimizacionSober {
+    Calidad,
+    #[default]
+    Equilibrado,
+    Rendimiento,
+}
+
+impl OptimizacionSober {
+    pub const TODOS: [OptimizacionSober; 3] = [OptimizacionSober::Calidad, OptimizacionSober::Equilibrado, OptimizacionSober::Rendimiento];
+
+    pub fn clave(self) -> &'static str {
+        match self {
+            OptimizacionSober::Calidad => "quality",
+            OptimizacionSober::Equilibrado => "balanced",
+            OptimizacionSober::Rendimiento => "performance",
+        }
+    }
+}
+
+/// Escalado estilo Lossless Scaling: Roblox se dibuja a menos resolución y
+/// se amplía a la de la pantalla con FSR 1 (Linux: gamescope).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Escalado {
+    Apagado,
+    /// 77 % por lado (FSR «Ultra Quality»).
+    #[default]
+    Calidad,
+    /// 67 % (FSR «Quality»).
+    Equilibrado,
+    /// 50 % (FSR «Performance»).
+    Rendimiento,
+}
+
+impl Escalado {
+    pub const TODOS: [Escalado; 4] = [Escalado::Apagado, Escalado::Calidad, Escalado::Equilibrado, Escalado::Rendimiento];
+
+    /// La fracción de la resolución de la pantalla a la que se dibuja Roblox.
+    pub fn factor(self) -> Option<f32> {
+        match self {
+            Escalado::Apagado => None,
+            Escalado::Calidad => Some(0.77),
+            Escalado::Equilibrado => Some(0.67),
+            Escalado::Rendimiento => Some(0.5),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AjustesCliente {
     pub api: ApiGrafica,
@@ -57,6 +106,41 @@ pub struct AjustesCliente {
     pub geometria_reducida: bool,
     pub cielo_gris: bool,
     pub sin_escalado_dpi: bool,
+    pub escalado: Escalado,
+    /// Sober: antialiasing SMAA y nitidez CAS con vkBasalt (necesita Vulkan).
+    pub smaa: bool,
+    /// Límite de FPS; `None` = sin límite.
+    pub limite_fps: Option<u16>,
+    /// Sober: generación de fotogramas con MAKO (beta, necesita Vulkan).
+    pub mako: bool,
+    /// Broma: muestra «6767 FPS» encima del juego (no toca el contador de Roblox).
+    pub fingir_fps: bool,
+    pub optimizacion: OptimizacionSober,
+}
+
+impl Default for AjustesCliente {
+    fn default() -> Self {
+        Self {
+            api: ApiGrafica::Auto,
+            msaa: None,
+            texturas: None,
+            sin_hierba: false,
+            geometria_reducida: false,
+            cielo_gris: false,
+            sin_escalado_dpi: false,
+            escalado: Escalado::default(),
+            smaa: true,
+            limite_fps: Some(60),
+            mako: false,
+            fingir_fps: false,
+            optimizacion: OptimizacionSober::default(),
+        }
+    }
+}
+
+impl AjustesCliente {
+    /// Valores del límite de FPS que se pueden elegir en Ajustes.
+    pub const LIMITES_FPS: [Option<u16>; 7] = [None, Some(30), Some(45), Some(60), Some(90), Some(120), Some(144)];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +165,32 @@ pub struct Config {
     pub cerrar_al_salir: bool,
     /// Buscar e instalar solo las versiones nuevas del launcher.
     pub actualizar_launcher: bool,
+    /// Idioma elegido en Ajustes; `None`: el del sistema.
+    pub idioma: Option<crate::idioma::Idioma>,
+    /// Escalador de la vista del editor (pestaña Crear).
+    pub escalador: EscaladorEditor,
+    /// Generación de fotogramas en el editor (experimental).
+    pub generar_fotogramas: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EscaladorEditor {
+    Fsr1,
+    Fsr2,
+    #[default]
+    Fsr3,
+}
+
+impl EscaladorEditor {
+    pub const TODOS: [EscaladorEditor; 3] = [EscaladorEditor::Fsr1, EscaladorEditor::Fsr2, EscaladorEditor::Fsr3];
+
+    pub fn numero(self) -> u8 {
+        match self {
+            EscaladorEditor::Fsr1 => 1,
+            EscaladorEditor::Fsr2 => 2,
+            EscaladorEditor::Fsr3 => 3,
+        }
+    }
 }
 
 impl Default for Config {
@@ -98,11 +208,14 @@ impl Default for Config {
             version: VERSION_CONFIG,
             cerrar_al_salir: true,
             actualizar_launcher: true,
+            idioma: None,
+            escalador: EscaladorEditor::default(),
+            generar_fotogramas: false,
         }
     }
 }
 
-pub const VERSION_CONFIG: u32 = 4;
+pub const VERSION_CONFIG: u32 = 5;
 
 fn ruta() -> PathBuf {
     base().join("config.json")
@@ -114,9 +227,16 @@ impl Config {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        if c.version < 4 {
-            // Antes el launcher se minimizaba al jugar; ahora Roblox se abre encima.
-            c.al_jugar = AlJugar::Nada;
+        if c.version < VERSION_CONFIG {
+            if c.version < 4 {
+                // Antes el launcher se minimizaba al jugar; ahora Roblox se abre encima.
+                c.al_jugar = AlJugar::Nada;
+            }
+            // En Linux, SMAA (vkBasalt) y MAKO necesitan que Sober use Vulkan,
+            // que es lo que elige «Automático».
+            if c.version < 5 && cfg!(target_os = "linux") && c.cliente.api == ApiGrafica::OpenGL {
+                c.cliente.api = ApiGrafica::Auto;
+            }
             c.version = VERSION_CONFIG;
             c.guardar();
         }

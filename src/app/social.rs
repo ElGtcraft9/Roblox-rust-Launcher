@@ -146,7 +146,7 @@ impl App {
         let zona_izq = Rect::from_min_max(Pos2::new(x0 - 8.0, y), Pos2::new(x0 + izq + 8.0, pantalla.bottom() - 60.0));
         match &self.conversaciones {
             Carga::Error(e) => {
-                let g = galley(ui, &format!("No se pudieron cargar los chats. {e}"), cuerpo(escala::ETIQUETA), ERROR, izq, 4);
+                let g = galley(ui, &trf("No se pudieron cargar los chats. {}", &[e]), cuerpo(escala::ETIQUETA), ERROR, izq, 4);
                 p.galley(Pos2::new(x0, y), g, ERROR);
             }
             Carga::Listo(l) if l.is_empty() => {

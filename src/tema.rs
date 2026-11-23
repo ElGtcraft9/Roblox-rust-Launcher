@@ -29,7 +29,7 @@ pub const RADIO: u8 = 6;
 pub const MARGEN: f32 = 64.0;
 
 pub fn cuerpo(t: f32) -> FontId {
-    FontId::proportional(t)
+    FontId::new(t, FontFamily::Name("cuerpo".into()))
 }
 pub fn medio(t: f32) -> FontId {
     FontId::new(t, FontFamily::Name("medio".into()))
@@ -54,9 +54,11 @@ pub mod escala {
     pub const ETIQUETA: f32 = 14.0;
 }
 
-pub fn aplicar(ctx: &egui::Context) {
-    let mut f = FontDefinitions::default();
-    let respaldo = f.families[&FontFamily::Proportional].clone();
+/// Añade las fuentes del launcher a `f`. Todas van en familias con nombre
+/// propio (también la del texto normal, «cuerpo»): así conviven con las de
+/// rustudio, que sustituye las proporcionales al abrir la pestaña Crear.
+fn anadir_fuentes(f: &mut FontDefinitions) {
+    let respaldo: Vec<String> = FontDefinitions::default().families[&FontFamily::Proportional].clone();
     for (nombre, datos) in [
         ("barlow", &include_bytes!("../assets/barlow-400.ttf")[..]),
         ("barlow-500", &include_bytes!("../assets/barlow-500.ttf")[..]),
@@ -66,8 +68,12 @@ pub fn aplicar(ctx: &egui::Context) {
     ] {
         f.font_data.insert(nombre.into(), Arc::new(FontData::from_static(datos)));
     }
-    f.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "barlow".into());
+    // (las fuentes de respaldo de egui, por si rustudio no las dejó)
+    for (k, v) in FontDefinitions::default().font_data {
+        f.font_data.entry(k).or_insert(v);
+    }
     for (familia, fuente) in [
+        ("cuerpo", "barlow"),
         ("medio", "barlow-500"),
         ("semi", "barlow-600"),
         ("estrecha", "barlow-c-600"),
@@ -77,6 +83,13 @@ pub fn aplicar(ctx: &egui::Context) {
         lista.extend(respaldo.iter().cloned());
         f.families.insert(FontFamily::Name(familia.into()), lista);
     }
+}
+
+pub fn aplicar(ctx: &egui::Context) {
+    egui::set_permanent_fonts(Some(anadir_fuentes));
+    let mut f = FontDefinitions::default();
+    f.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "barlow".into());
+    anadir_fuentes(&mut f);
     ctx.set_fonts(f);
     ctx.set_theme(egui::Theme::Dark);
 
@@ -197,15 +210,17 @@ pub fn pista(p: &egui::Painter, pos: Pos2, boton: &str, texto: &str, mando: bool
 /// 12345 → «12,3 mil»; 1_200_000 → «1,2 M».
 pub fn abreviar(n: u64) -> String {
     let f = |x: f64, suf: &str| {
-        let s = format!("{x:.1}").replace('.', ",");
-        let s = s.strip_suffix(",0").unwrap_or(&s).to_string();
-        format!("{s} {suf}")
+        let s = format!("{x:.1}");
+        let s = if crate::idioma::actual() == crate::idioma::Idioma::En { s } else { s.replace('.', ",") };
+        let s = s.strip_suffix(",0").or_else(|| s.strip_suffix(".0")).unwrap_or(&s).to_string();
+        if crate::idioma::actual() == crate::idioma::Idioma::En { format!("{s}{suf}") } else { format!("{s} {suf}") }
     };
+    let ingles = crate::idioma::actual() == crate::idioma::Idioma::En;
     match n {
         0..1_000 => n.to_string(),
-        1_000..1_000_000 => f(n as f64 / 1e3, "mil"),
+        1_000..1_000_000 => f(n as f64 / 1e3, if ingles { "K" } else { "mil" }),
         1_000_000..1_000_000_000 => f(n as f64 / 1e6, "M"),
-        _ => f(n as f64 / 1e9, "mil M"),
+        _ => f(n as f64 / 1e9, if ingles { "B" } else { "mil M" }),
     }
 }
 
@@ -215,6 +230,8 @@ mod tests {
 
     #[test]
     fn abrevia() {
+        let _turno = crate::idioma::PRUEBAS_IDIOMA.lock().unwrap_or_else(|e| e.into_inner());
+        crate::idioma::fijar(crate::idioma::Idioma::Es);
         assert_eq!(abreviar(999), "999");
         assert_eq!(abreviar(12_345), "12,3 mil");
         assert_eq!(abreviar(2_000_000), "2 M");

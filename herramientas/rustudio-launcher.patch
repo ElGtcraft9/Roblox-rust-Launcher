@@ -1,0 +1,3688 @@
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-core/src/rustudio_settings.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-core/src/rustudio_settings.rs
+--- a/crates/rustudio-core/src/rustudio_settings.rs	2026-11-22 12:53:46.275000794 -0600
++++ b/crates/rustudio-core/src/rustudio_settings.rs	2026-11-21 19:53:52.279864007 -0600
+@@ -77,7 +77,7 @@
+ 
+ pub const OPTS: &[Opt] = &[
+     Opt { key: "quality", cat: "Performance", label: "Graphics quality", desc: "Automatic adjusts the viewport quality level using recent frame times. Manual uses the settings below.", env: "RUSTUDIO_PERF_QUALITY", kind: OptKind::Choice(&[("manual", "Manual"), ("automatic", "Automatic")]) },
+-    Opt { key: "resolution", cat: "Performance", label: "3D resolution", desc: "Scales the 3D scene while keeping editor text sharp. The biggest saving on a weak graphics chip: 50% draws a quarter of the pixels.", env: "RUSTUDIO_PERF_RESOLUTION", kind: OptKind::Choice(&[("100", "100%"), ("75", "75%"), ("50", "50%"), ("33", "33%"), ("25", "25%")]) },
++    Opt { key: "resolution", cat: "Performance", label: "3D resolution", desc: "Scales the 3D scene while keeping editor text sharp. The biggest saving on a weak graphics chip: 50% draws a quarter of the pixels.", env: "RUSTUDIO_PERF_RESOLUTION", kind: OptKind::Choice(&[("100", "100%"), ("75", "75%"), ("50", "50%"), ("33", "33%"), ("25", "25%"), ("auto", "Automatic")]) },
+     Opt { key: "detail", cat: "Performance", label: "Shading detail", desc: "Medium drops sky reflections and extra lighting work; Low also drops material maps, the light grid, local lights and multisample anti-aliasing (as Studio's lower quality levels do), keeping sun, shadow and ambient. The biggest saving on a weak graphics chip.", env: "RUSTUDIO_PERF_DETAIL", kind: OptKind::Choice(&[("high", "High"), ("medium", "Medium"), ("low", "Low")]) },
+     Opt { key: "ssao", cat: "Performance", label: "Ambient occlusion", desc: "Darkens creases and corners. Off skips the screen-space pass, which costs several milliseconds a frame on a weak graphics chip.", env: "RUSTUDIO_PERF_SSAO", kind: OptKind::Choice(&[("on", "On"), ("off", "Off")]) },
+     Opt { key: "shadows", cat: "Performance", label: "Shadow quality", desc: "Reduced draws smaller sun shadow tiles. Off also disables local light shadows.", env: "RUSTUDIO_PERF_SHADOWS", kind: OptKind::Choice(&[("full", "Full"), ("reduced", "Reduced"), ("off", "Off")]) },
+@@ -461,7 +461,13 @@
+ 
+ /// A Performance row's default when nothing is saved or set.
+ fn choice_default(key: &str) -> Option<&'static str> {
+-    (key == "quality" && weak_gpu()).then_some("automatic")
++    match key {
++        "quality" => weak_gpu().then_some("automatic"),
++        // (RustLauncher) a pixel budget with the FSR 1 upscale (game_view
++        // auto_render_scale).
++        "resolution" => weak_gpu().then_some("auto"),
++        _ => None,
++    }
+ }
+ 
+ pub fn performance_choice(key: &str) -> usize {
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/game.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-player/src/game.rs
+--- a/crates/rustudio-player/src/game.rs	2026-11-22 12:53:46.951771411 -0600
++++ b/crates/rustudio-player/src/game.rs	2026-11-21 19:53:52.272088573 -0600
+@@ -127,6 +127,10 @@
+     /// (camera aspect from it; drawn scaled into the panel): self-test
+     /// steps that compare with a Studio capture at Studio's view size.
+     pub view_render_size: Option<[u32; 2]>,
++    /// (RustLauncher) The view's size on screen in physical pixels, which
++    /// the rendered image (smaller at a 3D resolution below 100 %) is
++    /// upscaled to by `Renderer::finish_view`.
++    pub view_out_size: [u32; 2],
+ }
+ 
+ impl Game {
+@@ -212,6 +216,7 @@
+             terrain_brushed: None,
+             lighting: Default::default(),
+             view_render_size: None,
++            view_out_size: [1, 1],
+         }
+     }
+ }
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/game_view.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-player/src/game_view.rs
+--- a/crates/rustudio-player/src/game_view.rs	2026-11-22 12:53:46.952771411 -0600
++++ b/crates/rustudio-player/src/game_view.rs	2026-11-22 12:27:12.356215270 -0600
+@@ -1999,7 +1999,7 @@
+         self.sync_terrain_grass();
+         // Decoration sways in Edit mode too, even when input is idle.
+         if !self.terrain_grass_built.is_empty() && (rustudio_core::rustudio_settings::performance_choice("idle") == 0 || self.is_playing()) {
+-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
++            ctx.request_repaint_after(idle_animation_interval(self.is_playing()));
+         }
+     }
+ 
+@@ -2048,15 +2048,56 @@
+             }
+             None => rect,
+         };
+-        let scale = rustudio_core::rustudio_settings::performance_value("resolution")
+-            .parse::<f32>()
+-            .unwrap_or(100.0)
+-            / 100.0;
++        let scale = match rustudio_core::rustudio_settings::performance_value("resolution") {
++            "auto" => auto_render_scale(size),
++            v => v.parse::<f32>().unwrap_or(100.0) / 100.0,
++        };
++        // (RustLauncher) finish_view upscales the image back to this (FSR 1).
++        self.view_out_size = size;
+         size = size.map(|n| (n as f32 * scale).round().max(1.0) as u32);
+-        let (globals, lights, shadows, sun_cascades) = {
++        let (mut globals, lights, shadows, sun_cascades) = {
+             let _l = rustudio_core::bench::scope("lighting");
+             self.frame_lighting(rrect)
+         };
++        // (RustLauncher) FSR 2 (rustudio-render fsr2.rs): this frame draws
++        // shifted by a sub-pixel jitter, and the renderer gets the matrices
++        // with and without it to turn depth into motion. Perspective views
++        // only (the motion comes from reverse-Z depth).
++        let mut gen_cam: Option<(glam::Mat4, glam::Mat4)> = None;
++        if let (Some(r), Some(rs)) = (self.renderer.as_mut(), self.render_state.as_ref()) {
++            if rustudio_render::escalado::temporal() && self.cam.ortho.is_none() && self.view_render_size.is_none() {
++                let jitter = r.temporal_jitter(rs, size, self.view_out_size);
++                let vp = glam::Mat4::from_cols_array_2d(&globals.view_proj);
++                gen_cam = Some((vp, glam::Mat4::from_cols_array_2d(&globals.inv_view_proj)));
++                let shift = glam::Mat4::from_translation(Vec3::new(
++                    2.0 * jitter[0] / size[0] as f32,
++                    -2.0 * jitter[1] / size[1] as f32,
++                    0.0,
++                ));
++                let vp_jittered = shift * vp;
++                // inv(shift x vp) = inv(vp) x inv(shift), from the frame's own
++                // inverse: inverting the jittered matrix again in f32 left
++                // the infinite far plane's w a hair off zero, sometimes
++                // negative, and the sky shader's view rays flipped (a flat
++                // sky while the camera moved).
++                let unshift = glam::Mat4::from_translation(Vec3::new(
++                    -2.0 * jitter[0] / size[0] as f32,
++                    2.0 * jitter[1] / size[1] as f32,
++                    0.0,
++                ));
++                let inv_jittered = glam::Mat4::from_cols_array_2d(&globals.inv_view_proj) * unshift;
++                globals.view_proj = vp_jittered.to_cols_array_2d();
++                globals.inv_view_proj = inv_jittered.to_cols_array_2d();
++                r.set_temporal(Some(rustudio_render::fsr2::Frame {
++                    jitter,
++                    view_proj: vp,
++                    inv_view_proj_jittered: inv_jittered,
++                    cam_pos: self.cam.pos,
++                }));
++            } else {
++                r.set_temporal(None);
++            }
++        }
+         // Studio's scene environment probe (env_probe.rs): the PBR
+         // technologies' 128 px indoor reflection cube.
+         let probe = (quality.is_none_or(|p| p.detail() >= 2.0) && globals.env_spec[2] > 0.5 && std::env::var_os("RUSTUDIO_NO_ENV_PROBE").is_none()).then(|| {
+@@ -2069,7 +2110,16 @@
+             self.env_probe.update(self.cam.pos, self.cam.forward(), dt, now, revision, &ray)
+         });
+         let vp_render = rustudio_core::bench::scope("vp_render");
++        // (RustLauncher) Frame generation: every other turn is made from the
++        // last drawn frame instead of drawing the scene (generar.rs).
++        let generated = match (self.renderer.as_mut(), self.render_state.as_ref(), gen_cam) {
++            (Some(r), Some(rs), Some((vp, inv_vp))) if rustudio_render::escalado::generar() => {
++                r.try_generate(rs, self.view_out_size, vp, inv_vp, self.cam.pos)
++            }
++            _ => None,
++        };
+         let tex = match (self.renderer.as_mut(), self.render_state.as_ref()) {
++            _ if generated.is_some() => generated,
+             (Some(r), Some(rs)) => r.render(
+                 rs,
+                 size,
+@@ -2267,7 +2317,7 @@
+                 },
+             );
+             if live {
+-                ctx.request_repaint();
++                ctx.request_repaint_after(idle_animation_interval(play.is_some()));
+             }
+         }
+         // SurfaceGuis / BillboardGuis behind the world stay behind it (round 23).
+@@ -2279,6 +2329,8 @@
+             r.draw_world_gui(rs, ctx.font_texture_update(), &self.gui.world_batches, self.effects.drawn(), curve);
+             // Highlights last, over the finished image (highlight.rs).
+             r.draw_highlights(rs, &hl);
++            // (RustLauncher) Then FXAA / the FSR 1 upscale (finish.rs).
++            r.finish_view(rs, self.view_out_size);
+         }
+         if let Some(s) = self
+             .play
+@@ -2866,6 +2918,22 @@
+             rustudio_render::render::sphere_visible(&planes, c, r)
+         }, voxel_lights);
+         drop(lt_gather);
++        // (RustLauncher) Shading detail High on a weak GPU: the nearest
++        // PIXEL_LIGHTS lights (gather sorts them by distance) are shaded per
++        // pixel, with specular and their shadow maps; the rest are baked into
++        // the voxel light grid, one texture read for all of them (shader.wgsl
++        // adds local_grid_light), as Studio's lower quality levels bake them
++        // all. Laser Tag (up to 119 lights) on a Vega 8: the per-pixel
++        // lights were most of the scene pass at level 16.
++        let baked: Vec<rustudio_render::render::LightRaw> = if !voxel_lights
++            && rustudio_core::rustudio_settings::weak_gpu()
++            && !rustudio_render::lighting::soft_style(&self.doc)
++            && lights.len() > PIXEL_LIGHTS
++        {
++            lights.split_off(PIXEL_LIGHTS)
++        } else {
++            Vec::new()
++        };
+         self.lighting.drawn_lights = lights.len();
+         let skybox = self.renderer.as_ref().is_some_and(|r| r.sky_size > 0);
+         let mut fl = rustudio_render::lighting::globals(
+@@ -2903,7 +2971,11 @@
+             fl.globals.cc_tint[3] = 0.0;
+             fl.globals.bloom[1] = -1.0;
+         }
+-        fl.globals.lightgrid = self.sync_lightgrid(&lights, fl.sun_true, grid_sun, voxel_lights);
++        fl.globals.lightgrid = if baked.is_empty() {
++            self.sync_lightgrid(&lights, fl.sun_true, grid_sun, voxel_lights)
++        } else {
++            self.sync_lightgrid(&baked, fl.sun_true, grid_sun, true)
++        };
+         fl.globals.lightocc = if voxel_lights { [0.0; 4] } else {
+             let _s = rustudio_core::bench::scope("lt_occ");
+             self.sync_lightocc(&lights)
+@@ -3217,3 +3289,42 @@
+         self.game_viewport(ui, rect, &resp, gui_took);
+     }
+ }
++
++/// (RustLauncher) Performance > 3D resolution "Automatic" (the default on a
++/// weak GPU): the view draws at most RENDER_BUDGET pixels and FSR 1 brings
++/// it back to the screen size. The editor's view at 1280x760 (0.33 MP)
++/// stays at 100 %; a maximized window's (~1400x780) draws at ~68 %, FSR's
++/// Quality mode; full screen at 1080p at 50 %, its Performance mode.
++/// Measured on a Vega 8 (Laser Tag, Play, manual quality): 75 % took the
++/// frame from 25 to 44 fps, 50 % to 61.
++/// With FSR 2 on, the budget is lower (0.35 MP): its temporal upscale keeps
++/// the image at ~57 % (a maximized window) about as sharp as FSR 1's at
++/// 68 %, and the frame cheaper (Laser Tag, Play: 44 fps at 50 % against 35
++/// at 68 %).
++fn auto_render_scale(size: [u32; 2]) -> f32 {
++    let budget: f32 = if rustudio_render::escalado::temporal() { 350_000.0 } else { 500_000.0 };
++    let pixels = size[0] as f32 * size[1] as f32;
++    if pixels <= budget {
++        1.0
++    } else {
++        (budget / pixels).sqrt().clamp(0.5, 1.0)
++    }
++}
++
++/// (RustLauncher) Lights shaded per pixel at shading detail High on a weak
++/// GPU; the rest go into the voxel light grid (the frame's lighting, above).
++const PIXEL_LIGHTS: usize = 8;
++
++/// (RustLauncher) How often animation alone (particles, beams, swaying
++/// grass) redraws the view: every frame in Play, at most 30 times a second
++/// in Edit. Input still redraws at once, so moving the camera or a part
++/// stays at full rate; an untouched editor stops drawing 60 frames a second
++/// on a laptop (measured on a Ryzen 7 5700U, Laser Tag template: the idle
++/// editor kept the process at 54 % of a core and the GPU 59 % busy).
++fn idle_animation_interval(playing: bool) -> std::time::Duration {
++    if playing {
++        std::time::Duration::ZERO
++    } else {
++        std::time::Duration::from_millis(33)
++    }
++}
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/escalado.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/escalado.rs
+--- a/crates/rustudio-render/src/escalado.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/crates/rustudio-render/src/escalado.rs	2026-11-22 12:37:21.345669314 -0600
+@@ -0,0 +1,61 @@
++//! (RustLauncher) Which upscaler the view uses (Settings > Escalado del
++//! editor): FSR 1 (spatial, finish.rs), FSR 2 (fsr2.rs) or FSR 3.1
++//! (fsr3.rs), both temporal; and whether frames are generated (generar.rs).
++//! For tests and benches: RUSTUDIO_ESCALADO=1|2|3 and RUSTUDIO_GENERAR=1.
++
++use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Modo {
++    Fsr1,
++    Fsr2,
++    Fsr3,
++}
++
++/// 1, 2 or 3 (FSR 1, 2, 3.1).
++static MODO: AtomicU8 = AtomicU8::new(3);
++static GENERAR: AtomicBool = AtomicBool::new(false);
++
++fn entorno() -> &'static (Option<u8>, bool) {
++    static E: std::sync::OnceLock<(Option<u8>, bool)> = std::sync::OnceLock::new();
++    E.get_or_init(|| {
++        (
++            std::env::var("RUSTUDIO_ESCALADO").ok().and_then(|v| v.parse().ok()),
++            std::env::var_os("RUSTUDIO_GENERAR").is_some(),
++        )
++    })
++}
++
++pub fn set_modo(m: Modo) {
++    MODO.store(
++        match m {
++            Modo::Fsr1 => 1,
++            Modo::Fsr2 => 2,
++            Modo::Fsr3 => 3,
++        },
++        Ordering::Relaxed,
++    );
++}
++
++pub fn modo() -> Modo {
++    match entorno().0.unwrap_or_else(|| MODO.load(Ordering::Relaxed)) {
++        1 => Modo::Fsr1,
++        2 => Modo::Fsr2,
++        _ => Modo::Fsr3,
++    }
++}
++
++/// Whether the temporal upscalers (FSR 2 and 3.1) are in use: the view then
++/// draws with a jitter and hands its camera motion over.
++pub fn temporal() -> bool {
++    modo() != Modo::Fsr1
++}
++
++/// Frame generation (experimental, off by default).
++pub fn set_generar(on: bool) {
++    GENERAR.store(on, Ordering::Relaxed);
++}
++
++pub fn generar() -> bool {
++    entorno().1 || GENERAR.load(Ordering::Relaxed)
++}
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/finish.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/finish.rs
+--- a/crates/rustudio-render/src/finish.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/crates/rustudio-render/src/finish.rs	2026-11-22 12:27:03.497346542 -0600
+@@ -0,0 +1,552 @@
++//! (RustLauncher) The view's last passes, after everything else has drawn
++//! into the display image (post, world GUIs, effects, highlights):
++//!
++//! - **FXAA** in place of multisampling on a weak GPU. 4× MSAA multiplied
++//!   the raster, the see-through encode and decode (both per sample) and the
++//!   resolve: on a Vega 8 it cost a quarter of the frame at quality level 18.
++//! - **FSR 1 upscaling** (EASU, then RCAS sharpening) when the 3D view is
++//!   drawn below its on-screen size (Performance > 3D resolution, or
++//!   Automatic on a weak GPU), instead of egui's bilinear stretch.
++//!
++//! EASU and RCAS follow AMD FidelityFX Super Resolution 1.0 (MIT licence):
++//! the edge-adaptive Lanczos-2-like upscale with its direction and length
++//! analysis over four bilinear quadrants and its deringing clamp, and the
++//! robust contrast-adaptive sharpen. FXAA follows the published FXAA 3.11
++//! quality algorithm (edge walk along the luma edge, sub-pixel blend).
++//! Both are written here from those algorithms for wgpu.
++//!
++//! The display image is 8-bit and already in the display's gamma, the space
++//! all three expect.
++
++use egui_wgpu::wgpu;
++
++const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
++/// RCAS sharpness in stops (0 = sharpest; FSR suggests 0.2): a little
++/// softer, so stone and concrete textures drawn at 68 % do not crawl.
++const RCAS_STOPS: f32 = 0.35;
++
++const SHADER: &str = r#"
++struct Params {
++    in_size: vec2<f32>,
++    out_size: vec2<f32>,
++    sharp: vec4<f32>,
++};
++@group(0) @binding(0) var src: texture_2d<f32>;
++@group(0) @binding(1) var smp: sampler;
++@group(0) @binding(2) var<uniform> P: Params;
++
++@vertex
++fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
++    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
++    return vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
++}
++
++// ---------------------------------------------------------------- FXAA
++
++fn luma(c: vec3<f32>) -> f32 {
++    return dot(c, vec3<f32>(0.299, 0.587, 0.114));
++}
++fn sample_luma(uv: vec2<f32>) -> f32 {
++    return luma(textureSampleLevel(src, smp, uv, 0.0).rgb);
++}
++
++const FXAA_MIN: f32 = 0.0312;
++const FXAA_MAX: f32 = 0.125;
++const FXAA_SUBPIX: f32 = 0.75;
++
++@fragment
++fn fs_fxaa(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
++    let inv = 1.0 / P.in_size;
++    let uv = p.xy * inv;
++    let centre = textureSampleLevel(src, smp, uv, 0.0);
++    let lm = luma(centre.rgb);
++    let ln = sample_luma(uv + vec2<f32>(0.0, -inv.y));
++    let ls = sample_luma(uv + vec2<f32>(0.0, inv.y));
++    let lw = sample_luma(uv + vec2<f32>(-inv.x, 0.0));
++    let le = sample_luma(uv + vec2<f32>(inv.x, 0.0));
++    let hi = max(lm, max(max(ln, ls), max(lw, le)));
++    let lo = min(lm, min(min(ln, ls), min(lw, le)));
++    let range = hi - lo;
++    if (range < max(FXAA_MIN, hi * FXAA_MAX)) {
++        return centre;
++    }
++    let lnw = sample_luma(uv + vec2<f32>(-inv.x, -inv.y));
++    let lne = sample_luma(uv + vec2<f32>(inv.x, -inv.y));
++    let lsw = sample_luma(uv + vec2<f32>(-inv.x, inv.y));
++    let lse = sample_luma(uv + vec2<f32>(inv.x, inv.y));
++    let edge_h = abs(-2.0 * lw + lnw + lsw) + 2.0 * abs(-2.0 * lm + ln + ls) + abs(-2.0 * le + lne + lse);
++    let edge_v = abs(-2.0 * ln + lnw + lne) + 2.0 * abs(-2.0 * lm + lw + le) + abs(-2.0 * ls + lsw + lse);
++    // A horizontal edge: blend across Y, walk along X.
++    let horizontal = edge_h >= edge_v;
++    let l1 = select(lw, ln, horizontal); // the negative side
++    let l2 = select(le, ls, horizontal); // the positive side
++    let g1 = abs(l1 - lm);
++    let g2 = abs(l2 - lm);
++    let toward1 = g1 >= g2;
++    let grad = 0.25 * max(g1, g2);
++    var step_len = select(inv.x, inv.y, horizontal);
++    var local_avg = 0.5 * (l2 + lm);
++    if (toward1) {
++        step_len = -step_len;
++        local_avg = 0.5 * (l1 + lm);
++    }
++    var on_edge = uv;
++    if (horizontal) { on_edge.y += 0.5 * step_len; } else { on_edge.x += 0.5 * step_len; }
++    let along = select(vec2<f32>(0.0, inv.y), vec2<f32>(inv.x, 0.0), horizontal);
++    var uv1 = on_edge - along;
++    var uv2 = on_edge + along;
++    var end1 = sample_luma(uv1) - local_avg;
++    var end2 = sample_luma(uv2) - local_avg;
++    var done1 = abs(end1) >= grad;
++    var done2 = abs(end2) >= grad;
++    if (!done1) { uv1 -= along; }
++    if (!done2) { uv2 += along; }
++    var steps = array<f32, 10>(1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 4.0, 8.0);
++    for (var i = 0; i < 10; i++) {
++        if (done1 && done2) { break; }
++        if (!done1) { end1 = sample_luma(uv1) - local_avg; }
++        if (!done2) { end2 = sample_luma(uv2) - local_avg; }
++        done1 = abs(end1) >= grad;
++        done2 = abs(end2) >= grad;
++        if (!done1) { uv1 -= along * steps[i]; }
++        if (!done2) { uv2 += along * steps[i]; }
++    }
++    let d1 = select(uv.y - uv1.y, uv.x - uv1.x, horizontal);
++    let d2 = select(uv2.y - uv.y, uv2.x - uv.x, horizontal);
++    let nearer1 = d1 < d2;
++    let thickness = d1 + d2;
++    let pixel_offset = 0.5 - min(d1, d2) / max(thickness, 1e-6);
++    let centre_smaller = lm < local_avg;
++    let good = (select(end2, end1, nearer1) < 0.0) != centre_smaller;
++    var offset = select(0.0, pixel_offset, good);
++    // Sub-pixel aliasing: thin features the edge walk misses.
++    let avg = (2.0 * (ln + ls + lw + le) + lnw + lne + lsw + lse) / 12.0;
++    let s1 = clamp(abs(avg - lm) / range, 0.0, 1.0);
++    let s2 = (-2.0 * s1 + 3.0) * s1 * s1;
++    offset = max(offset, s2 * s2 * FXAA_SUBPIX);
++    var out_uv = uv;
++    if (horizontal) { out_uv.y += offset * step_len; } else { out_uv.x += offset * step_len; }
++    return vec4<f32>(textureSampleLevel(src, smp, out_uv, 0.0).rgb, 1.0);
++}
++
++// ---------------------------------------------------------------- FSR 1 EASU
++
++fn tap(fp: vec2<i32>, off: vec2<i32>) -> vec3<f32> {
++    let hi = vec2<i32>(P.in_size) - vec2<i32>(1);
++    return textureLoad(src, clamp(fp + off, vec2<i32>(0), hi), 0).rgb;
++}
++// Luma ×2 for the analysis (FSR: B/2 + R/2 + G).
++fn l2(c: vec3<f32>) -> f32 {
++    return c.b * 0.5 + (c.r * 0.5 + c.g);
++}
++
++struct DirLen { dir: vec2<f32>, len: f32 };
++
++// One bilinear quadrant's direction and edge length, weighted by w; the
++// centre lc with its up la, left lb, right ld, down le.
++fn easu_set(acc: DirLen, w: f32, la: f32, lb: f32, lc: f32, ld: f32, le: f32) -> DirLen {
++    var r = acc;
++    let dir_x = ld - lb;
++    let len_x = clamp(abs(dir_x) / max(max(abs(ld - lc), abs(lc - lb)), 1e-8), 0.0, 1.0);
++    r.len += len_x * len_x * w;
++    r.dir.x += dir_x * w;
++    let dir_y = le - la;
++    let len_y = clamp(abs(dir_y) / max(max(abs(le - lc), abs(lc - la)), 1e-8), 0.0, 1.0);
++    r.len += len_y * len_y * w;
++    r.dir.y += dir_y * w;
++    return r;
++}
++
++struct Acc { c: vec3<f32>, w: f32 };
++
++fn easu_tap(acc: Acc, off: vec2<f32>, dir: vec2<f32>, len: vec2<f32>, lob: f32, clp: f32, c: vec3<f32>) -> Acc {
++    // Rotate into the edge's frame, then stretch along / across it.
++    var v = vec2<f32>(off.x * dir.x + off.y * dir.y, off.x * (-dir.y) + off.y * dir.x);
++    v *= len;
++    let d2 = min(dot(v, v), clp);
++    // Lanczos-2 approximated: (25/16 (2/5 x² - 1)² - (25/16 - 1)) × (lob x² - 1)².
++    var wb = 0.4 * d2 - 1.0;
++    var wa = lob * d2 - 1.0;
++    wb *= wb;
++    wa *= wa;
++    wb = 1.5625 * wb - 0.5625;
++    let w = wb * wa;
++    var r = acc;
++    r.c += c * w;
++    r.w += w;
++    return r;
++}
++
++@fragment
++fn fs_easu(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
++    let pp0 = p.xy * (P.in_size / P.out_size) - vec2<f32>(0.5);
++    let fpf = floor(pp0);
++    let pp = pp0 - fpf;
++    let fp = vec2<i32>(fpf);
++    //    b c
++    //  e f g h
++    //  i j k l
++    //    n o
++    let b = tap(fp, vec2<i32>(0, -1));
++    let c = tap(fp, vec2<i32>(1, -1));
++    let e = tap(fp, vec2<i32>(-1, 0));
++    let f = tap(fp, vec2<i32>(0, 0));
++    let g = tap(fp, vec2<i32>(1, 0));
++    let h = tap(fp, vec2<i32>(2, 0));
++    let i = tap(fp, vec2<i32>(-1, 1));
++    let j = tap(fp, vec2<i32>(0, 1));
++    let k = tap(fp, vec2<i32>(1, 1));
++    let l = tap(fp, vec2<i32>(2, 1));
++    let n = tap(fp, vec2<i32>(0, 2));
++    let o = tap(fp, vec2<i32>(1, 2));
++    let lb = l2(b); let lc = l2(c); let le = l2(e); let lf = l2(f); let lg = l2(g); let lh = l2(h);
++    let li = l2(i); let lj = l2(j); let lk = l2(k); let ll = l2(l); let ln = l2(n); let lo = l2(o);
++    var dl = DirLen(vec2<f32>(0.0), 0.0);
++    dl = easu_set(dl, (1.0 - pp.x) * (1.0 - pp.y), lb, le, lf, lg, lj);
++    dl = easu_set(dl, pp.x * (1.0 - pp.y), lc, lf, lg, lh, lk);
++    dl = easu_set(dl, (1.0 - pp.x) * pp.y, lf, li, lj, lk, ln);
++    dl = easu_set(dl, pp.x * pp.y, lg, lj, lk, ll, lo);
++    var dir = dl.dir;
++    let dir2 = dot(dir, dir);
++    if (dir2 < 1.0 / 32768.0) {
++        dir = vec2<f32>(1.0, 0.0);
++    } else {
++        dir *= inverseSqrt(dir2);
++    }
++    var len = dl.len * 0.5;
++    len *= len;
++    // Stretch the kernel along the edge, squeeze it across.
++    let stretch = 1.0 / max(abs(dir.x), abs(dir.y));
++    let len2 = vec2<f32>(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
++    let lob = 0.5 + (0.25 - 0.04 - 0.5) * len;
++    let clp = 1.0 / lob;
++    var acc = Acc(vec3<f32>(0.0), 0.0);
++    acc = easu_tap(acc, vec2<f32>(0.0, -1.0) - pp, dir, len2, lob, clp, b);
++    acc = easu_tap(acc, vec2<f32>(1.0, -1.0) - pp, dir, len2, lob, clp, c);
++    acc = easu_tap(acc, vec2<f32>(-1.0, 1.0) - pp, dir, len2, lob, clp, i);
++    acc = easu_tap(acc, vec2<f32>(0.0, 1.0) - pp, dir, len2, lob, clp, j);
++    acc = easu_tap(acc, vec2<f32>(0.0, 0.0) - pp, dir, len2, lob, clp, f);
++    acc = easu_tap(acc, vec2<f32>(-1.0, 0.0) - pp, dir, len2, lob, clp, e);
++    acc = easu_tap(acc, vec2<f32>(1.0, 1.0) - pp, dir, len2, lob, clp, k);
++    acc = easu_tap(acc, vec2<f32>(2.0, 1.0) - pp, dir, len2, lob, clp, l);
++    acc = easu_tap(acc, vec2<f32>(2.0, 0.0) - pp, dir, len2, lob, clp, h);
++    acc = easu_tap(acc, vec2<f32>(1.0, 0.0) - pp, dir, len2, lob, clp, g);
++    acc = easu_tap(acc, vec2<f32>(1.0, 2.0) - pp, dir, len2, lob, clp, o);
++    acc = easu_tap(acc, vec2<f32>(0.0, 2.0) - pp, dir, len2, lob, clp, n);
++    // Deringing: within the four nearest texels.
++    let mn = min(min(f, g), min(j, k));
++    let mx = max(max(f, g), max(j, k));
++    let col = clamp(acc.c / max(acc.w, 1e-6), mn, mx);
++    return vec4<f32>(col, 1.0);
++}
++
++// ---------------------------------------------------------------- FSR 1 RCAS
++
++const RCAS_LIMIT: f32 = 0.25 - 1.0 / 16.0;
++
++@fragment
++fn fs_rcas(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
++    let ip = vec2<i32>(p.xy);
++    let hi = vec2<i32>(P.out_size) - vec2<i32>(1);
++    let b = textureLoad(src, clamp(ip + vec2<i32>(0, -1), vec2<i32>(0), hi), 0).rgb;
++    let d = textureLoad(src, clamp(ip + vec2<i32>(-1, 0), vec2<i32>(0), hi), 0).rgb;
++    let e = textureLoad(src, ip, 0).rgb;
++    let f = textureLoad(src, clamp(ip + vec2<i32>(1, 0), vec2<i32>(0), hi), 0).rgb;
++    let h = textureLoad(src, clamp(ip + vec2<i32>(0, 1), vec2<i32>(0), hi), 0).rgb;
++    let mn4 = min(min(b, d), min(f, h));
++    let mx4 = max(max(b, d), max(f, h));
++    // How far the ring can push without clipping, per channel.
++    let hit_min = min(mn4, e) / max(4.0 * mx4, vec3<f32>(1e-6));
++    let hit_max = (vec3<f32>(1.0) - max(mx4, e)) / min(4.0 * mn4 - vec3<f32>(4.0), vec3<f32>(-1e-6));
++    let lobe_c = max(-hit_min, hit_max);
++    let lobe = max(-RCAS_LIMIT, min(max(lobe_c.r, max(lobe_c.g, lobe_c.b)), 0.0)) * P.sharp.x;
++    let col = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
++    return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
++}
++"#;
++
++struct Tex {
++    _tex: wgpu::Texture,
++    view: wgpu::TextureView,
++}
++
++fn texture(device: &wgpu::Device, label: &str, size: [u32; 2]) -> Tex {
++    let tex = device.create_texture(&wgpu::TextureDescriptor {
++        label: Some(label),
++        size: wgpu::Extent3d { width: size[0].max(1), height: size[1].max(1), depth_or_array_layers: 1 },
++        mip_level_count: 1,
++        sample_count: 1,
++        dimension: wgpu::TextureDimension::D2,
++        format: FORMAT,
++        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
++        view_formats: &[],
++    });
++    let view = tex.create_view(&Default::default());
++    Tex { _tex: tex, view }
++}
++
++/// What the targets were made for: the source image (its generation), its
++/// size, the size on screen, and whether FXAA runs.
++#[derive(Clone, Copy, PartialEq, Eq)]
++struct Key {
++    source: u64,
++    in_size: [u32; 2],
++    out_size: [u32; 2],
++    fxaa: bool,
++}
++
++struct Targets {
++    key: Key,
++    /// FXAA's output (at the render size), when it runs.
++    fxaa: Option<(Tex, wgpu::BindGroup)>,
++    /// EASU's output and RCAS's (at the on-screen size), when upscaling.
++    upscale: Option<(Tex, wgpu::BindGroup, Tex, wgpu::BindGroup)>,
++    /// The bind group reading the display image (FXAA's or EASU's input).
++    from_display: wgpu::BindGroup,
++}
++
++pub struct Finish {
++    layout: wgpu::BindGroupLayout,
++    sampler: wgpu::Sampler,
++    params: wgpu::Buffer,
++    fxaa: wgpu::RenderPipeline,
++    easu: wgpu::RenderPipeline,
++    rcas: wgpu::RenderPipeline,
++    targets: Option<Targets>,
++    /// RCAS alone over an image already upscaled (FSR 2's): its output.
++    sharpened: Option<([u32; 2], Tex)>,
++    /// Bumped each time the image shown changes texture.
++    generation: u64,
++}
++
++impl Finish {
++    pub fn new(device: &wgpu::Device) -> Self {
++        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
++            label: Some("finish"),
++            entries: &[
++                wgpu::BindGroupLayoutEntry {
++                    binding: 0,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Texture {
++                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
++                        view_dimension: wgpu::TextureViewDimension::D2,
++                        multisampled: false,
++                    },
++                    count: None,
++                },
++                wgpu::BindGroupLayoutEntry {
++                    binding: 1,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
++                    count: None,
++                },
++                wgpu::BindGroupLayoutEntry {
++                    binding: 2,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Buffer {
++                        ty: wgpu::BufferBindingType::Uniform,
++                        has_dynamic_offset: false,
++                        min_binding_size: None,
++                    },
++                    count: None,
++                },
++            ],
++        });
++        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
++            label: Some("finish"),
++            mag_filter: wgpu::FilterMode::Linear,
++            min_filter: wgpu::FilterMode::Linear,
++            ..Default::default()
++        });
++        let params = device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("finish params"),
++            size: 32,
++            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
++            mapped_at_creation: false,
++        });
++        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
++            label: Some("finish"),
++            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
++        });
++        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
++            label: Some("finish"),
++            bind_group_layouts: &[Some(&layout)],
++            immediate_size: 0,
++        });
++        let pipeline = |entry: &str| {
++            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
++                label: Some(entry),
++                layout: Some(&pipeline_layout),
++                vertex: wgpu::VertexState {
++                    module: &module,
++                    entry_point: Some("vs_full"),
++                    buffers: &[],
++                    compilation_options: Default::default(),
++                },
++                fragment: Some(wgpu::FragmentState {
++                    module: &module,
++                    entry_point: Some(entry),
++                    targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
++                    compilation_options: Default::default(),
++                }),
++                primitive: Default::default(),
++                depth_stencil: None,
++                multisample: Default::default(),
++                multiview_mask: None,
++                cache: None,
++            })
++        };
++        Self {
++            fxaa: pipeline("fs_fxaa"),
++            easu: pipeline("fs_easu"),
++            rcas: pipeline("fs_rcas"),
++            layout,
++            sampler,
++            params,
++            targets: None,
++            sharpened: None,
++            generation: 0,
++        }
++    }
++
++    fn group(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
++        device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("finish"),
++            layout: &self.layout,
++            entries: &[
++                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
++                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
++                wgpu::BindGroupEntry { binding: 2, resource: self.params.as_entire_binding() },
++            ],
++        })
++    }
++
++    /// (RustLauncher) RCAS over `input` (`size`, already at the size on
++    /// screen: FSR 2's output). Returns the view to show and its generation.
++    pub fn sharpen(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, input: &wgpu::TextureView, size: [u32; 2]) -> (&wgpu::TextureView, u64) {
++        self.targets = None;
++        if self.sharpened.as_ref().is_none_or(|(s, _)| *s != size) {
++            self.sharpened = Some((size, texture(device, "fsr2 rcas", size)));
++            self.generation += 1;
++        }
++        let sharp = 2f32.powf(-RCAS_STOPS);
++        let params: [f32; 8] = [size[0] as f32, size[1] as f32, size[0] as f32, size[1] as f32, sharp, 0.0, 0.0, 0.0];
++        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
++        let input_group = self.group(device, input);
++        let (_, out) = self.sharpened.as_ref().expect("sharpened");
++        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("fsr2 rcas") });
++        {
++            let mut p = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
++                label: Some("fsr2 rcas"),
++                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
++                    view: &out.view,
++                    depth_slice: None,
++                    resolve_target: None,
++                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
++                })],
++                depth_stencil_attachment: None,
++                timestamp_writes: None,
++                occlusion_query_set: None,
++                multiview_mask: None,
++            });
++            p.set_pipeline(&self.rcas);
++            p.set_bind_group(0, &input_group, &[]);
++            p.draw(0..3, 0..1);
++        }
++        queue.submit([encoder.finish()]);
++        (&out.view, self.generation)
++    }
++
++    /// The last image `sharpen` produced (what the view showed).
++    pub fn last_sharpened(&self) -> Option<&wgpu::TextureView> {
++        self.sharpened.as_ref().map(|(_, t)| &t.view)
++    }
++
++    /// Runs FXAA and/or the upscale over `display` (`source` changes when
++    /// that texture is recreated). Returns the view to show and its
++    /// generation, or `None` when the display image is shown as it is.
++    pub fn apply(
++        &mut self,
++        device: &wgpu::Device,
++        queue: &wgpu::Queue,
++        display: &wgpu::TextureView,
++        source: u64,
++        in_size: [u32; 2],
++        out_size: [u32; 2],
++        fxaa: bool,
++    ) -> Option<(&wgpu::TextureView, u64)> {
++        self.sharpened = None;
++        let upscale = out_size[0] > in_size[0] || out_size[1] > in_size[1];
++        if !fxaa && !upscale {
++            self.targets = None;
++            return None;
++        }
++        let key = Key { source, in_size, out_size, fxaa };
++        if self.targets.as_ref().is_none_or(|t| t.key != key) {
++            let fxaa_t = fxaa.then(|| {
++                let t = texture(device, "fxaa", in_size);
++                let g = self.group(device, &t.view);
++                (t, g)
++            });
++            let up = upscale.then(|| {
++                let easu = texture(device, "fsr easu", out_size);
++                let easu_g = self.group(device, &easu.view);
++                let rcas = texture(device, "fsr rcas", out_size);
++                let rcas_g = self.group(device, &rcas.view);
++                (easu, easu_g, rcas, rcas_g)
++            });
++            let from_display = self.group(device, display);
++            self.targets = Some(Targets { key, fxaa: fxaa_t, upscale: up, from_display });
++            self.generation += 1;
++        }
++        let t = self.targets.as_ref()?;
++        let sharp = 2f32.powf(-RCAS_STOPS);
++        let params: [f32; 8] = [
++            in_size[0] as f32,
++            in_size[1] as f32,
++            out_size[0] as f32,
++            out_size[1] as f32,
++            sharp,
++            0.0,
++            0.0,
++            0.0,
++        ];
++        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
++        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("finish") });
++        let mut pass = |pipeline: &wgpu::RenderPipeline, input: &wgpu::BindGroup, output: &wgpu::TextureView| {
++            let mut p = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
++                label: Some("finish"),
++                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
++                    view: output,
++                    depth_slice: None,
++                    resolve_target: None,
++                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
++                })],
++                depth_stencil_attachment: None,
++                timestamp_writes: None,
++                occlusion_query_set: None,
++                multiview_mask: None,
++            });
++            p.set_pipeline(pipeline);
++            p.set_bind_group(0, input, &[]);
++            p.draw(0..3, 0..1);
++        };
++        let mut input = &t.from_display;
++        if let Some((out, group)) = &t.fxaa {
++            pass(&self.fxaa, input, &out.view);
++            input = group;
++        }
++        if let Some((easu, easu_g, rcas, _)) = &t.upscale {
++            pass(&self.easu, input, &easu.view);
++            pass(&self.rcas, easu_g, &rcas.view);
++        }
++        drop(pass);
++        queue.submit([encoder.finish()]);
++        let shown = match (&t.upscale, &t.fxaa) {
++            (Some((_, _, rcas, _)), _) => &rcas.view,
++            (None, Some((out, _))) => &out.view,
++            (None, None) => return None,
++        };
++        Some((shown, self.generation))
++    }
++}
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/fsr2.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/fsr2.rs
+--- a/crates/rustudio-render/src/fsr2.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/crates/rustudio-render/src/fsr2.rs	2026-11-22 12:20:00.314130311 -0600
+@@ -0,0 +1,1078 @@
++//! (RustLauncher) Temporal upscaling with AMD FidelityFX Super Resolution 2
++//! (FSR 2.2's upscaler as shipped in the FSR SDK 2.4.0,
++//! `upscalers/fsr3/include/gpu/fsr2`, MIT licence: Copyright (C) 2026
++//! Advanced Micro Devices, Inc.), ported to WGSL compute for wgpu. The passes
++//! and their maths follow the SDK's shaders:
++//!
++//! 1. **reconstruct** (render size, `ffx_fsr2_reconstruct_previous_depth.h`):
++//!    nearest depth over 3×3 and its motion vector (dilation), the previous
++//!    frame's depth reconstructed by scattering this one's along the motion
++//!    (atomic max: reverse-Z), and the lock luma;
++//! 2. **luma mip** (render / 32, `ffx_fsr2_compute_luminance_pyramid.h`):
++//!    mean log luma, the mip FSR 2 reads shading changes from (level 4);
++//! 3. **depth clip** (render size, `ffx_fsr2_depth_clip.h`): disocclusion
++//!    from the depth separation test (Ksep = 1.37e-5), motion and depth
++//!    divergence (the accumulation mask), the colour in YCoCg;
++//! 4. **lock** (render size, `ffx_fsr2_lock.h`): thin features (one-pixel
++//!    ridges) locked at the output pixel they land on;
++//! 5. **accumulate** (output size, `ffx_fsr2_accumulate.h`,
++//!    `ffx_fsr2_reproject.h`, `ffx_fsr2_upsample.h`,
++//!    `ffx_fsr2_postprocess_lock_status.h`): Lanczos-2 history reprojection
++//!    with deringing, lock lifetime and luma, the 3×3 Lanczos upsample and
++//!    its variance box, luma instability over the last four frames, history
++//!    rectification and the weighted blend.
++//!
++//! Then RCAS (finish.rs). Where rustudio differs from what FSR 2 expects:
++//! - the input is the finished display image (8-bit, after post), so the
++//!   exposure is 1 and nothing is tonemapped (FSR 2's LDR path);
++//! - motion vectors are the camera's, from depth and this and the last
++//!   frame's view-projection (rustudio draws no per-object velocity); what
++//!   moves on its own is left to the rectification box;
++//! - there are no reactive or transparency masks (FSR 2 treats them as 0).
++//!
++//! The view draws with a sub-pixel jitter (Halton 2,3; FSR 2's phase count
++//! 8 × (output / render)²) that `jitter` hands out frame by frame.
++
++use egui_wgpu::wgpu;
++use glam::{Mat4, Vec3, Vec4};
++
++/// Studs to metres (FSR's depth divergence works in metres).
++const METERS_PER_STUD: f32 = 0.28;
++
++/// FSR 2 reads shading changes from luma mip 4: 1 / (2 << 4) of the render size.
++const MIP_DIV: u32 = 32;
++
++const SHADER: &str = r#"
++struct P {
++    render_size: vec2<f32>,
++    out_size: vec2<f32>,
++    jitter: vec2<f32>,
++    frame_index: f32,
++    phases: f32,
++    inv_vp: mat4x4<f32>,
++    prev_vp: mat4x4<f32>,
++    near: f32,
++    meters: f32,
++    kfov: f32,
++    pad0: f32,
++    mip_size: vec2<f32>,
++    pad1: vec2<f32>,
++};
++@group(0) @binding(0) var<uniform> p: P;
++
++const EPSILON: f32 = 1e-3;                          // FSR2_EPSILON
++const FLT_MAX: f32 = 3.402823466e+38;
++const RECON_WEIGHT_THRESHOLD: f32 = 0.01;           // fReconstructedDepthBilinearWeightThreshold
++const UPSAMPLE_WEIGHT_SCALE: f32 = 1.0 / 12.0;      // fUpsampleLanczosWeightScale
++const MAX_ACC_LANCZOS_WEIGHT: f32 = 1.0;            // fMaxAccumulationLanczosWeight
++const AVG_LANCZOS_WEIGHT: f32 = 0.74 / 12.0;        // fAverageLanczosWeightPerFrame
++const MIP_DIV: f32 = 32.0;
++const PI: f32 = 3.141592653589793;
++
++fn rs() -> vec2<i32> { return vec2<i32>(p.render_size); }
++fn os() -> vec2<i32> { return vec2<i32>(p.out_size); }
++fn clamp_px(q: vec2<i32>, size: vec2<i32>) -> vec2<i32> {
++    return clamp(q, vec2<i32>(0), size - vec2<i32>(1));
++}
++fn on_screen(q: vec2<i32>, size: vec2<i32>) -> bool {
++    return all(q >= vec2<i32>(0)) && all(q < size);
++}
++fn uv_inside(uv: vec2<f32>) -> bool {
++    return all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
++}
++// ClampUv: keep a bilinear footprint inside the texture.
++fn clamp_uv(uv: vec2<f32>, size: vec2<f32>) -> vec2<f32> {
++    return clamp(uv * size, vec2<f32>(0.5), size - vec2<f32>(0.5)) / size;
++}
++fn rgb_to_ycocg(c: vec3<f32>) -> vec3<f32> {
++    return vec3<f32>(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
++}
++fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
++    return vec3<f32>(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
++}
++// The display image is gamma-encoded; luminance wants linear light.
++fn linear(c: vec3<f32>) -> vec3<f32> {
++    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
++}
++fn rgb_to_luma(c: vec3<f32>) -> f32 {
++    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
++}
++fn perceived_luma(c: vec3<f32>) -> f32 {
++    let l = rgb_to_luma(c);
++    var pl = 0.0;
++    if (l <= 216.0 / 24389.0) {
++        pl = l * (24389.0 / 27.0);
++    } else {
++        pl = pow(l, 1.0 / 3.0) * 116.0 - 16.0;
++    }
++    return pl * 0.01;
++}
++fn min_div_max(a: f32, b: f32) -> f32 {
++    let m = max(a, b);
++    return select(0.0, min(a, b) / m, m != 0.0);
++}
++fn view_depth(d: f32) -> f32 {
++    // Infinite reverse-Z: device depth = NEAR / view depth.
++    return min(p.near / max(d, 1e-7), 65504.0);
++}
++fn lanczos2(x0: f32) -> f32 {
++    let x = min(abs(x0), 2.0);
++    if (x < EPSILON) { return 1.0; }
++    return (sin(PI * x) / (PI * x)) * (sin(0.5 * PI * x) / (0.5 * PI * x));
++}
++fn lanczos2_approx_sq(x2_in: f32) -> f32 {
++    let x2 = min(x2_in, 4.0);
++    let a = (2.0 / 5.0) * x2 - 1.0;
++    let b = (1.0 / 4.0) * x2 - 1.0;
++    return ((25.0 / 16.0) * a * a - (25.0 / 16.0 - 1.0)) * (b * b);
++}
++
++struct Bilinear { base: vec2<i32>, w: vec4<f32> };
++// GetBilinearSamplingData: the four texels around uv and their weights
++// (offsets (0,0), (1,0), (0,1), (1,1)).
++fn bilinear(uv: vec2<f32>, size: vec2<f32>) -> Bilinear {
++    let pos = uv * size - 0.5;
++    let base = floor(pos);
++    let f = pos - base;
++    return Bilinear(vec2<i32>(base), vec4<f32>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y));
++}
++fn corner(i: i32) -> vec2<i32> {
++    return vec2<i32>(i & 1, i >> 1);
++}
++
++// ------------------------------------------------------------ 1. reconstruct
++
++@group(1) @binding(0) var in_color: texture_2d<f32>;
++@group(1) @binding(1) var in_depth: texture_depth_2d;
++@group(1) @binding(2) var w_depth: texture_storage_2d<r32float, write>;
++@group(1) @binding(3) var w_mv: texture_storage_2d<rg32float, write>;
++@group(1) @binding(4) var w_lock_luma: texture_storage_2d<r32float, write>;
++@group(1) @binding(5) var<storage, read_write> recon: array<atomic<u32>>;
++
++@compute @workgroup_size(8, 8)
++fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
++    let px = vec2<i32>(id.xy);
++    let size = rs();
++    if (!on_screen(px, size)) { return; }
++    // FindNearestDepth: reverse-Z, so the nearest is the largest.
++    var nearest = textureLoad(in_depth, px, 0);
++    var nearest_px = px;
++    for (var y = -1; y <= 1; y++) {
++        for (var x = -1; x <= 1; x++) {
++            let q = px + vec2<i32>(x, y);
++            if (!on_screen(q, size)) { continue; }
++            let d = textureLoad(in_depth, q, 0);
++            if (d > nearest) { nearest = d; nearest_px = q; }
++        }
++    }
++    // The nearest sample's motion, from the camera: where its surface point
++    // was on screen last frame (unjittered), minus where it is now.
++    let uv_n = (vec2<f32>(nearest_px) + 0.5) / p.render_size;
++    let ndc = vec2<f32>(uv_n.x * 2.0 - 1.0, 1.0 - uv_n.y * 2.0);
++    let h = p.inv_vp * vec4<f32>(ndc, max(nearest, 1e-7), 1.0);
++    let world = h.xyz / h.w;
++    let prev = p.prev_vp * vec4<f32>(world, 1.0);
++    var mv = vec2<f32>(0.0);
++    if (prev.w > 1e-6) {
++        let pn = prev.xy / prev.w;
++        let prev_uv = vec2<f32>(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
++        let cur_uv = (vec2<f32>(nearest_px) + 0.5 - p.jitter) / p.render_size;
++        mv = prev_uv - cur_uv;
++    }
++    textureStore(w_depth, px, vec4<f32>(nearest, 0.0, 0.0, 0.0));
++    textureStore(w_mv, px, vec4<f32>(mv, 0.0, 0.0));
++    // ReconstructPrevDepth: this depth, at the pixels it covered last frame.
++    let m = mv * f32(length(mv * p.out_size) > 0.1);
++    let b = bilinear((vec2<f32>(px) + 0.5) / p.render_size + m, p.render_size);
++    for (var i = 0; i < 4; i++) {
++        if (b.w[i] > RECON_WEIGHT_THRESHOLD) {
++            let q = b.base + corner(i);
++            if (on_screen(q, size)) {
++                atomicMax(&recon[q.y * size.x + q.x], bitcast<u32>(nearest));
++            }
++        }
++    }
++    // ComputeLockInputLuma.
++    let c = linear(textureLoad(in_color, px, 0).rgb);
++    textureStore(w_lock_luma, px, vec4<f32>(pow(perceived_luma(c), 1.0 / 6.0), 0.0, 0.0, 0.0));
++}
++
++// ------------------------------------------------------------ 2. luma mip
++
++@group(1) @binding(0) var m_color: texture_2d<f32>;
++@group(1) @binding(1) var w_mip: texture_storage_2d<r32float, write>;
++
++var<workgroup> m_sum: array<f32, 64>;
++var<workgroup> m_count: array<f32, 64>;
++
++// One workgroup per mip texel: the mean log luma of a 32x32 block.
++@compute @workgroup_size(8, 8)
++fn luma_mip(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
++    let size = rs();
++    let base = vec2<i32>(wg.xy) * i32(MIP_DIV) + vec2<i32>(lid.xy) * 4;
++    var s = 0.0;
++    var n = 0.0;
++    for (var y = 0; y < 4; y++) {
++        for (var x = 0; x < 4; x++) {
++            let q = base + vec2<i32>(x, y);
++            if (on_screen(q, size)) {
++                s += log(max(EPSILON, rgb_to_luma(linear(textureLoad(m_color, q, 0).rgb))));
++                n += 1.0;
++            }
++        }
++    }
++    m_sum[li] = s;
++    m_count[li] = n;
++    workgroupBarrier();
++    if (li == 0u) {
++        var ts = 0.0;
++        var tn = 0.0;
++        for (var i = 0; i < 64; i++) {
++            ts += m_sum[i];
++            tn += m_count[i];
++        }
++        textureStore(w_mip, vec2<i32>(wg.xy), vec4<f32>(select(0.0, ts / tn, tn > 0.0), 0.0, 0.0, 0.0));
++    }
++}
++
++// ------------------------------------------------------------ 3. depth clip
++
++@group(1) @binding(0) var c_color: texture_2d<f32>;
++@group(1) @binding(1) var c_depth: texture_2d<f32>;
++@group(1) @binding(2) var c_mv: texture_2d<f32>;
++@group(1) @binding(3) var c_prev_mv: texture_2d<f32>;
++@group(1) @binding(4) var<storage, read> c_recon: array<u32>;
++@group(1) @binding(5) var w_prepared: texture_storage_2d<rgba16float, write>;
++@group(1) @binding(6) var w_masks: texture_storage_2d<rgba16float, write>;
++
++fn recon_depth(q: vec2<i32>) -> f32 {
++    let size = rs();
++    let c = clamp_px(q, size);
++    return bitcast<f32>(c_recon[c.y * size.x + c.x]);
++}
++
++// ComputeDepthClip: the surface here was hidden last frame when it is
++// farther than what the last frame had there, by more than the separation
++// FSR 2 asks for at this depth and field of view.
++fn depth_clip(uv: vec2<f32>, cur_d: f32) -> f32 {
++    let size = rs();
++    let cur_z = view_depth(cur_d);
++    let b = bilinear(uv, p.render_size);
++    var depth = 0.0;
++    var wsum = 0.0;
++    for (var i = 0; i < 4; i++) {
++        let q = b.base + corner(i);
++        if (on_screen(q, size)) {
++            let w = b.w[i];
++            if (w > RECON_WEIGHT_THRESHOLD) {
++                let prev_z = view_depth(recon_depth(q));
++                let diff = cur_z - prev_z;
++                if (diff > 0.0) {
++                    let half_viewport = length(p.render_size);
++                    let threshold = max(cur_z, prev_z);
++                    let required = 1.37e-05 * p.kfov * half_viewport * threshold;
++                    let resolution = clamp(length(p.render_size) / length(vec2<f32>(1920.0, 1080.0)), 0.0, 1.0);
++                    let power = mix(1.0, 3.0, resolution);
++                    depth += pow(clamp(required / diff, 0.0, 1.0), power) * w;
++                    wsum += w;
++                }
++            }
++        }
++    }
++    return select(0.0, clamp(1.0 - depth / wsum, 0.0, 1.0), wsum > 0.0);
++}
++
++// EvaluateSurface: a steep slope seen edge-on is not a disocclusion.
++fn evaluate_surface(px: vec2<i32>) -> f32 {
++    let d0 = view_depth(recon_depth(px + vec2<i32>(0, -1)));
++    let d1 = view_depth(recon_depth(px));
++    let d2 = view_depth(recon_depth(px + vec2<i32>(0, 1)));
++    return 1.0 - f32(((d0 - d1) > (d1 * 0.01)) && ((d1 - d2) > (d2 * 0.01)));
++}
++
++fn motion_divergence(px: vec2<i32>) -> f32 {
++    let size = rs();
++    var min_convergence = 1.0;
++    let nucleus = textureLoad(c_mv, px, 0).xy;
++    var max_velocity = length(nucleus);
++    if (length(nucleus * p.render_size) > 1e-2) {
++        for (var y = -1; y <= 1; y++) {
++            for (var x = -1; x <= 1; x++) {
++                let m = textureLoad(c_mv, clamp_px(px + vec2<i32>(x, y), size), 0).xy;
++                var v = length(m);
++                max_velocity = max(v, max_velocity);
++                v = max(v, max_velocity);
++                min_convergence = min(min_convergence, dot(m / v, nucleus / v));
++            }
++        }
++    }
++    return clamp(1.0 - min_convergence, 0.0, 1.0) * clamp(max_velocity / 0.01, 0.0, 1.0);
++}
++
++fn depth_divergence(px: vec2<i32>) -> f32 {
++    let size = rs();
++    let max_m = 65504.0 * p.meters;
++    var dmax = 0.0;
++    var dmin = max_m;
++    var sky = false;
++    for (var y = -1; y < 2; y++) {
++        for (var x = -1; x < 2; x++) {
++            let q = px + vec2<i32>(x, y);
++            let on = f32(on_screen(q, size));
++            let z = view_depth(textureLoad(c_depth, clamp_px(q, size), 0).r) * p.meters * on;
++            sky = sky || (z == max_m);
++            dmin = min(dmin, z);
++            dmax = max(dmax, z);
++        }
++    }
++    return select((1.0 - dmin / dmax) * f32(!sky), 0.0, dmax <= 0.0);
++}
++
++fn temporal_motion_divergence(px: vec2<i32>) -> f32 {
++    let size = rs();
++    let uv = (vec2<f32>(px) + 0.5) / p.render_size;
++    let mv = textureLoad(c_mv, px, 0).xy;
++    let reproj = clamp_uv(uv + mv, p.render_size);
++    let prev_mv = textureLoad(c_prev_mv, clamp_px(vec2<i32>(reproj * p.render_size), size), 0).xy;
++    let px_distance = length(mv * p.out_size);
++    if (px_distance <= 1.0) { return 0.0; }
++    return mix(0.0, 1.0 - clamp(length(prev_mv) / length(mv), 0.0, 1.0), clamp(pow(px_distance / 20.0, 3.0), 0.0, 1.0));
++}
++
++@compute @workgroup_size(8, 8)
++fn depth_clip_pass(@builtin(global_invocation_id) id: vec3<u32>) {
++    let px = vec2<i32>(id.xy);
++    let size = rs();
++    if (!on_screen(px, size)) { return; }
++    let uv = (vec2<f32>(px) + 0.5) / p.render_size;
++    var mv = textureLoad(c_mv, px, 0).xy;
++    mv *= f32(length(mv * p.out_size) > 0.01);
++    let dilated_depth = textureLoad(c_depth, px, 0).r;
++    let clip = depth_clip(uv + mv, dilated_depth) * evaluate_surface(px);
++    let c = max(textureLoad(c_color, px, 0).rgb, vec3<f32>(0.0));
++    textureStore(w_prepared, px, vec4<f32>(rgb_to_ycocg(c), clip));
++    // PreProcessReactiveMasks with no reactive or composition masks: the
++    // accumulation mask is the motion divergence.
++    let temporal = clamp(temporal_motion_divergence(px) - depth_divergence(px), 0.0, 1.0);
++    textureStore(w_masks, px, vec4<f32>(0.0, max(temporal, motion_divergence(px)), 0.0, 0.0));
++}
++
++// ------------------------------------------------------------ 4. lock
++
++@group(1) @binding(0) var l_luma: texture_2d<f32>;
++@group(1) @binding(1) var w_new_locks: texture_storage_2d<r32float, write>;
++
++// ComputeThinFeatureConfidence: a one-pixel ridge (lines, wires, text) the
++// history should keep instead of the jittered frame's flicker.
++fn thin_feature(px: vec2<i32>) -> bool {
++    let size = rs();
++    let nucleus = textureLoad(l_luma, px, 0).r;
++    var dis_min = FLT_MAX;
++    var dis_max = 0.0;
++    var mask = 1u << 4u;
++    var idx = 0u;
++    for (var y = -1; y <= 1; y++) {
++        for (var x = -1; x <= 1; x++) {
++            if (!(x == 0 && y == 0)) {
++                let s = textureLoad(l_luma, clamp_px(px + vec2<i32>(x, y), size), 0).r;
++                let lo = min(s, nucleus);
++                let similar = lo > 0.0 && max(s, nucleus) / lo < 1.05;
++                if (similar) {
++                    mask |= 1u << idx;
++                } else {
++                    dis_min = min(dis_min, s);
++                    dis_max = max(dis_max, s);
++                }
++            }
++            idx += 1u;
++        }
++    }
++    if (!(nucleus > dis_max || nucleus < dis_min)) { return false; }
++    var rejection = array<u32, 4>(
++        (1u << 0u) | (1u << 1u) | (1u << 3u) | (1u << 4u),
++        (1u << 1u) | (1u << 2u) | (1u << 4u) | (1u << 5u),
++        (1u << 3u) | (1u << 4u) | (1u << 6u) | (1u << 7u),
++        (1u << 4u) | (1u << 5u) | (1u << 7u) | (1u << 8u));
++    for (var i = 0; i < 4; i++) {
++        if ((mask & rejection[i]) == rejection[i]) { return false; }
++    }
++    return true;
++}
++
++@compute @workgroup_size(8, 8)
++fn lock_pass(@builtin(global_invocation_id) id: vec3<u32>) {
++    let px = vec2<i32>(id.xy);
++    if (!on_screen(px, rs())) { return; }
++    if (thin_feature(px)) {
++        // ComputeHrPosFromLrPos.
++        let hr = vec2<i32>(floor((vec2<f32>(px) + 0.5 - p.jitter) / p.render_size * p.out_size));
++        if (on_screen(hr, os())) {
++            textureStore(w_new_locks, hr, vec4<f32>(1.0, 0.0, 0.0, 0.0));
++        }
++    }
++}
++
++// ------------------------------------------------------------ 5. accumulate
++
++@group(1) @binding(0) var a_prepared: texture_2d<f32>;
++@group(1) @binding(1) var a_masks: texture_2d<f32>;
++@group(1) @binding(2) var a_mv: texture_2d<f32>;
++@group(1) @binding(3) var a_history: texture_2d<f32>;
++@group(1) @binding(4) var a_lock: texture_2d<f32>;
++@group(1) @binding(5) var a_luma_history: texture_2d<f32>;
++@group(1) @binding(6) var a_new_locks: texture_2d<f32>;
++@group(1) @binding(7) var a_mip: texture_2d<f32>;
++@group(1) @binding(8) var w_history: texture_storage_2d<rgba16float, write>;
++@group(1) @binding(9) var w_lock: texture_storage_2d<rgba16float, write>;
++@group(1) @binding(10) var w_luma_history: texture_storage_2d<rgba8unorm, write>;
++@group(1) @binding(11) var w_out: texture_storage_2d<rgba8unorm, write>;
++@group(1) @binding(12) var a_sampler: sampler;
++
++// The history at uv: Lanczos-2 over 4x4 texels, clamped to the nearest
++// four (FSR 2's reprojection sampler with deringing).
++fn history_sample(uv: vec2<f32>) -> vec4<f32> {
++    let size = os();
++    let pos = uv * p.out_size - 0.5;
++    let base = vec2<i32>(floor(pos));
++    let f = pos - floor(pos);
++    var wx = array<f32, 4>(lanczos2(-1.0 - f.x), lanczos2(-f.x), lanczos2(1.0 - f.x), lanczos2(2.0 - f.x));
++    var wy = array<f32, 4>(lanczos2(-1.0 - f.y), lanczos2(-f.y), lanczos2(1.0 - f.y), lanczos2(2.0 - f.y));
++    let sx = wx[0] + wx[1] + wx[2] + wx[3];
++    let sy = wy[0] + wy[1] + wy[2] + wy[3];
++    var s = vec4<f32>(0.0);
++    var lo = vec4<f32>(FLT_MAX);
++    var hi = vec4<f32>(-FLT_MAX);
++    for (var y = 0; y < 4; y++) {
++        var row = vec4<f32>(0.0);
++        for (var x = 0; x < 4; x++) {
++            let c = textureLoad(a_history, clamp_px(base + vec2<i32>(x - 1, y - 1), size), 0);
++            row += c * wx[x];
++            if ((x == 1 || x == 2) && (y == 1 || y == 2)) {
++                lo = min(lo, c);
++                hi = max(hi, c);
++            }
++        }
++        s += (row / sx) * wy[y];
++    }
++    return clamp(s / sy, lo, hi);
++}
++
++// The shading-change luma at uv: the luma mip, bilinear.
++fn shading_change_luma(uv: vec2<f32>) -> f32 {
++    let msize = vec2<i32>(p.mip_size);
++    let render_mip = max(vec2<f32>(vec2<i32>(p.render_size / MIP_DIV)), vec2<f32>(1.0));
++    let uvc = clamp(uv * render_mip, vec2<f32>(0.5), render_mip - vec2<f32>(0.5)) / p.mip_size;
++    let b = bilinear(uvc, p.mip_size);
++    var v = 0.0;
++    for (var i = 0; i < 4; i++) {
++        v += textureLoad(a_mip, clamp_px(b.base + corner(i), msize), 0).r * b.w[i];
++    }
++    return pow(exp(v), 1.0 / 6.0);
++}
++
++@compute @workgroup_size(8, 8)
++fn accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
++    let hr = vec2<i32>(id.xy);
++    if (!on_screen(hr, os())) { return; }
++    let size = rs();
++    let downscale = p.render_size / p.out_size;
++
++    // InitParams.
++    let hr_uv = (vec2<f32>(hr) + 0.5) / p.out_size;
++    let lr_uv = clamp_uv(hr_uv + p.jitter / p.render_size, p.render_size);
++    let mv = textureLoad(a_mv, clamp_px(vec2<i32>(hr_uv * p.render_size), size), 0).xy;
++    let hr_velocity = length(mv * p.out_size);
++    let reproj = hr_uv + mv;
++    let existing = uv_inside(reproj);
++    let depth_clip = clamp(textureSampleLevel(a_prepared, a_sampler, lr_uv, 0.0).w, 0.0, 1.0);
++    let masks = textureSampleLevel(a_masks, a_sampler, lr_uv, 0.0);
++    let dilated_reactive = masks.x;
++    let acc_mask = masks.y;
++    let reset = p.frame_index < 0.5;
++    let is_new = !existing || reset;
++
++    // ReprojectHistoryColor and ReprojectHistoryLockStatus.
++    var hist = vec3<f32>(0.0);
++    var lock_status = vec2<f32>(0.0);
++    var temporal_reactive = 0.0;
++    var in_motion_last = false;
++    var new_lock = false;
++    if (existing && !reset) {
++        let h = history_sample(reproj);
++        hist = rgb_to_ycocg(h.rgb);
++        temporal_reactive = clamp(abs(h.w), 0.0, 1.0);
++        in_motion_last = h.w < 0.0;
++        new_lock = textureLoad(a_new_locks, hr, 0).r > 127.0 / 255.0;
++        lock_status = textureSampleLevel(a_lock, a_sampler, reproj, 0.0).xy;
++    }
++    var this_reactive = max(dilated_reactive, temporal_reactive);
++
++    // UpdateLockStatus (x: lifetime remaining, y: temporal luma).
++    let sc_luma = shading_change_luma(hr_uv);
++    if (lock_status.y == 0.0) { lock_status.y = sc_luma; }
++    let luma_diff = 1.0 - min_div_max(lock_status.y, sc_luma);
++    if (new_lock) {
++        lock_status.y = sc_luma;
++        lock_status.x = select(1.0, 2.0, lock_status.x != 0.0);
++    } else if (lock_status.x <= 1.0) {
++        lock_status.y = mix(lock_status.y, sc_luma, 0.5);
++    } else if (luma_diff > 0.1) {
++        lock_status.x = 0.0;
++    }
++    this_reactive = max(this_reactive, clamp((luma_diff - 0.1) * 10.0, 0.0, 1.0));
++    lock_status.x *= 1.0 - this_reactive;
++    lock_status.x *= clamp(1.0 - acc_mask, 0.0, 1.0);
++    lock_status.x *= f32(depth_clip < 0.1);
++    let lifetime_contrib = clamp(lock_status.x - 1.0, 0.0, 1.0);
++    let shading_contrib = clamp(min_div_max(lock_status.y, sc_luma), 0.0, 1.0);
++    let lock_contrib = clamp(clamp(lifetime_contrib * 4.0, 0.0, 1.0) * shading_contrib, 0.0, 1.0);
++
++    // ComputeUpsampledColorAndWeight: Lanczos-2 over the 3x3 jittered
++    // samples around this output pixel, and their rectification box.
++    let src_out = (vec2<f32>(hr) + 0.5) * downscale;
++    let src_in = vec2<i32>(floor(src_out));
++    let src_unj = vec2<f32>(src_in) + 0.5 - p.jitter;
++    let flip_col = src_unj.x > src_out.x;
++    let flip_row = src_unj.y > src_out.y;
++    let tl = vec2<i32>(select(-1, -2, flip_col), select(-1, -2, flip_row));
++    let base_off = src_unj - src_out;
++    let kernel_reactive = max(this_reactive, f32(is_new));
++    let max_kernel = min(1.99, 1.0 + (1.0 / downscale.x - 1.0));
++    let kb_max = max_kernel * (1.0 - kernel_reactive);
++    let kb_min = max(1.0, (1.0 + kb_max) * 0.3);
++    let kernel_bias = mix(kb_max, kb_min, max(0.0, max(0.25 * depth_clip, kernel_reactive)));
++    let curve_bias = mix(-2.0, -3.0, clamp(hr_velocity / 50.0, 0.0, 1.0));
++    var up = vec4<f32>(0.0);
++    var box_min = vec3<f32>(0.0);
++    var box_max = vec3<f32>(0.0);
++    var box_center = vec3<f32>(0.0);
++    var box_vec = vec3<f32>(0.0);
++    var box_w = 0.0;
++    for (var row = 0; row < 3; row++) {
++        for (var col = 0; col < 3; col++) {
++            let cr = vec2<i32>(select(col, 3 - col, flip_col), select(row, 3 - row, flip_row));
++            let q = src_in + tl + cr;
++            let off = base_off + vec2<f32>(tl + cr);
++            let s = textureLoad(a_prepared, clamp_px(q, size), 0).xyz;
++            let kb = off * kernel_bias;
++            let w = f32(on_screen(q, size)) * lanczos2_approx_sq(dot(kb, kb));
++            up += vec4<f32>(s * w, w);
++            let bw = exp(curve_bias * dot(off, off));
++            if (row == 0 && col == 0) {
++                box_min = s; box_max = s;
++                box_center = s * bw; box_vec = s * s * bw; box_w = bw;
++            } else {
++                box_min = min(box_min, s); box_max = max(box_max, s);
++                box_center += s * bw; box_vec += s * s * bw; box_w += bw;
++            }
++        }
++    }
++    box_w = select(1.0, box_w, abs(box_w) > EPSILON);
++    box_center /= box_w;
++    box_vec = sqrt(abs(box_vec / box_w - box_center * box_center));
++    up.w *= f32(up.w > EPSILON);
++    if (up.w > EPSILON) {
++        up = vec4<f32>(clamp(up.xyz / up.w, box_min, box_max), up.w * UPSAMPLE_WEIGHT_SCALE);
++    }
++
++    // ComputeLumaInstabilityFactor (the luma of the last four frames).
++    let cur_luma = round(box_center.x * 255.0) / 255.0;
++    let sample_history = max(max(depth_clip, acc_mask), luma_diff) < 0.1 && !is_new;
++    var luma_hist = select(vec4<f32>(0.0), textureSampleLevel(a_luma_history, a_sampler, reproj, 0.0), sample_history);
++    var instability = 0.0;
++    let d0 = cur_luma - luma_hist.x;
++    var lowest = abs(d0);
++    if (lowest >= 1.0 / 255.0) {
++        for (var i = 1; i < 4; i++) {
++            let d1 = cur_luma - luma_hist[i];
++            if (sign(d0) == sign(d1)) { lowest = min(lowest, abs(d1)); }
++        }
++        let box_size_factor = pow(clamp(box_vec.x / 0.1, 0.0, 1.0), 6.0);
++        instability = f32(lowest != abs(d0)) * box_size_factor;
++        instability = f32(instability > 1.0 / 255.0);
++        instability *= 1.0 - max(acc_mask, pow(this_reactive, 1.0 / 6.0));
++    }
++    luma_hist = vec4<f32>(cur_luma, luma_hist.x, luma_hist.y, luma_hist.z);
++    textureStore(w_luma_history, hr, luma_hist);
++    instability *= f32(luma_hist.w != 0.0);
++
++    // ComputeBaseAccumulationWeight.
++    var base_acc = MAX_ACC_LANCZOS_WEIGHT * f32(existing) * (1.0 - this_reactive) * (1.0 - depth_clip);
++    base_acc = min(base_acc, mix(base_acc, up.w * 10.0, max(f32(in_motion_last), clamp(hr_velocity * 10.0, 0.0, 1.0))));
++    base_acc = min(base_acc, mix(base_acc, up.w, clamp(hr_velocity / 20.0, 0.0, 1.0)));
++    var accumulation = vec3<f32>(base_acc);
++
++    var rgb = vec3<f32>(0.0);
++    if (is_new) {
++        rgb = ycocg_to_rgb(up.xyz);
++    } else {
++        // RectifyHistory.
++        let scale_influence = min(20.0, pow(1.0 / abs(downscale.x * downscale.y), 3.0));
++        let box_t = max(depth_clip, max(acc_mask, clamp(hr_velocity / 20.0, 0.0, 1.0)));
++        let scaled = box_vec * mix(scale_influence, 1.0, box_t);
++        let lo = max(box_min, box_center - scaled);
++        let hi = min(box_max, box_center + scaled);
++        if (any(lo > hist) || any(hist > hi)) {
++            let contribution = clamp(max(instability, lock_contrib) * (1.0 - sqrt(dilated_reactive)), 0.0, 1.0);
++            hist = mix(clamp(hist, lo, hi), hist, contribution);
++            accumulation = mix(min(accumulation, vec3<f32>(0.1)), accumulation, contribution);
++        }
++        // Accumulate.
++        accumulation = max(vec3<f32>(EPSILON), accumulation + vec3<f32>(up.w));
++        rgb = ycocg_to_rgb(mix(hist, up.xyz, vec3<f32>(up.w) / accumulation));
++    }
++    rgb = max(rgb, vec3<f32>(0.0));
++
++    // FinalizeLockStatus.
++    if (!uv_inside(hr_uv - mv)) {
++        lock_status.x = 0.0;
++    } else {
++        lock_status.x = max(0.0, lock_status.x - up.w / (p.phases * AVG_LANCZOS_WEIGHT));
++    }
++    textureStore(w_lock, hr, vec4<f32>(lock_status, 0.0, 0.0));
++
++    // ComputeTemporalReactiveFactor (negative: in motion this frame).
++    var reactive_next = min(0.99, this_reactive);
++    reactive_next = max(reactive_next, mix(reactive_next, 0.4, clamp(hr_velocity, 0.0, 1.0)));
++    reactive_next = max(reactive_next * reactive_next, max(depth_clip * 0.1, dilated_reactive));
++    if (is_new) { reactive_next = 1.0; }
++    if (clamp(hr_velocity * 10.0, 0.0, 1.0) >= 1.0) { reactive_next = -max(EPSILON, reactive_next); }
++    textureStore(w_history, hr, vec4<f32>(rgb, reactive_next));
++    textureStore(w_out, hr, vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
++}
++"#;
++
++struct Tex {
++    _tex: wgpu::Texture,
++    view: wgpu::TextureView,
++}
++
++fn texture(device: &wgpu::Device, label: &str, size: [u32; 2], format: wgpu::TextureFormat, render: bool) -> Tex {
++    let mut usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
++    if render {
++        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
++    }
++    let tex = device.create_texture(&wgpu::TextureDescriptor {
++        label: Some(label),
++        size: wgpu::Extent3d { width: size[0].max(1), height: size[1].max(1), depth_or_array_layers: 1 },
++        mip_level_count: 1,
++        sample_count: 1,
++        dimension: wgpu::TextureDimension::D2,
++        format,
++        usage,
++        view_formats: &[],
++    });
++    let view = tex.create_view(&Default::default());
++    Tex { _tex: tex, view }
++}
++
++struct Targets {
++    render_size: [u32; 2],
++    out_size: [u32; 2],
++    mip_size: [u32; 2],
++    depth: Tex,
++    /// Ping-ponged: this frame's and the last one's.
++    mv: [Tex; 2],
++    lock_luma: Tex,
++    mip: Tex,
++    prepared: Tex,
++    masks: Tex,
++    /// The previous frame's depth, reconstructed (f32 bits, atomic max).
++    recon: wgpu::Buffer,
++    new_locks: Tex,
++    history: [Tex; 2],
++    lock: [Tex; 2],
++    luma_history: [Tex; 2],
++    out: Tex,
++}
++
++/// What the frame was drawn with (`Renderer::set_temporal`).
++#[derive(Clone, Copy, Debug)]
++pub struct Frame {
++    /// The jitter in render pixels (`Fsr2::jitter`).
++    pub jitter: [f32; 2],
++    /// The view-projection without the jitter (the next frame's "previous").
++    pub view_proj: Mat4,
++    /// The inverse of the jittered view-projection the frame drew with.
++    pub inv_view_proj_jittered: Mat4,
++    pub cam_pos: Vec3,
++}
++
++pub struct Fsr2 {
++    globals_layout: wgpu::BindGroupLayout,
++    reconstruct_layout: wgpu::BindGroupLayout,
++    mip_layout: wgpu::BindGroupLayout,
++    clip_layout: wgpu::BindGroupLayout,
++    lock_layout: wgpu::BindGroupLayout,
++    accumulate_layout: wgpu::BindGroupLayout,
++    reconstruct: wgpu::ComputePipeline,
++    mip: wgpu::ComputePipeline,
++    clip: wgpu::ComputePipeline,
++    lock: wgpu::ComputePipeline,
++    accumulate: wgpu::ComputePipeline,
++    params: wgpu::Buffer,
++    sampler: wgpu::Sampler,
++    targets: Option<Targets>,
++    frame_index: u32,
++    last: Option<Frame>,
++}
++
++pub fn halton(mut index: u32, base: u32) -> f32 {
++    let (mut f, mut r) = (1.0f32, 0.0f32);
++    while index > 0 {
++        f /= base as f32;
++        r += f * (index % base) as f32;
++        index /= base;
++    }
++    r
++}
++
++/// FSR 2's jitter phase count for a render / output width
++/// (`ffxFsr2GetJitterPhaseCount`).
++pub fn phase_count(render_width: u32, out_width: u32) -> u32 {
++    ((8.0 * (out_width as f32 / render_width.max(1) as f32).powi(2)) as u32).max(1)
++}
++
++/// How much farther a screen corner is than the centre at the same view
++/// depth (FSR 2's Kfov), from the inverse view-projection.
++fn kfov(inv_view_proj: Mat4, cam_pos: Vec3) -> f32 {
++    let at = |x: f32, y: f32| {
++        let h = inv_view_proj * Vec4::new(x, y, 0.5, 1.0);
++        h.truncate() / h.w
++    };
++    let centre = at(0.0, 0.0).distance(cam_pos);
++    let corner = at(-1.0, 1.0).distance(cam_pos);
++    if centre > 1e-6 && corner.is_finite() { (corner / centre).max(1.0) } else { 1.0 }
++}
++
++impl Fsr2 {
++    pub fn new(device: &wgpu::Device) -> Self {
++        use wgpu::{BindGroupLayoutEntry as E, BindingType as T, ShaderStages as S};
++        let tex = |binding, sample_type| E {
++            binding,
++            visibility: S::COMPUTE,
++            ty: T::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
++            count: None,
++        };
++        let unfilterable = wgpu::TextureSampleType::Float { filterable: false };
++        let filterable = wgpu::TextureSampleType::Float { filterable: true };
++        let store = |binding, format| E {
++            binding,
++            visibility: S::COMPUTE,
++            ty: T::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format, view_dimension: wgpu::TextureViewDimension::D2 },
++            count: None,
++        };
++        let buffer = |binding, read_only| E {
++            binding,
++            visibility: S::COMPUTE,
++            ty: T::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
++            count: None,
++        };
++        use wgpu::TextureFormat as F;
++        let layout = |label, entries: &[E]| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries });
++        let globals_layout = layout(
++            "fsr2 params",
++            &[E {
++                binding: 0,
++                visibility: S::COMPUTE,
++                ty: T::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
++                count: None,
++            }],
++        );
++        let reconstruct_layout = layout(
++            "fsr2 reconstruct",
++            &[
++                tex(0, unfilterable),
++                tex(1, wgpu::TextureSampleType::Depth),
++                store(2, F::R32Float),
++                store(3, F::Rg32Float),
++                store(4, F::R32Float),
++                buffer(5, false),
++            ],
++        );
++        let mip_layout = layout("fsr2 luma mip", &[tex(0, unfilterable), store(1, F::R32Float)]);
++        let clip_layout = layout(
++            "fsr2 depth clip",
++            &[
++                tex(0, unfilterable),
++                tex(1, unfilterable),
++                tex(2, unfilterable),
++                tex(3, unfilterable),
++                buffer(4, true),
++                store(5, F::Rgba16Float),
++                store(6, F::Rgba16Float),
++            ],
++        );
++        let lock_layout = layout("fsr2 lock", &[tex(0, unfilterable), store(1, F::R32Float)]);
++        let accumulate_layout = layout(
++            "fsr2 accumulate",
++            &[
++                tex(0, filterable),
++                tex(1, filterable),
++                tex(2, unfilterable),
++                tex(3, unfilterable),
++                tex(4, filterable),
++                tex(5, filterable),
++                tex(6, unfilterable),
++                tex(7, unfilterable),
++                store(8, F::Rgba16Float),
++                store(9, F::Rgba16Float),
++                store(10, F::Rgba8Unorm),
++                store(11, F::Rgba8Unorm),
++                E { binding: 12, visibility: S::COMPUTE, ty: T::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
++            ],
++        );
++        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
++            label: Some("fsr2"),
++            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
++        });
++        let pipeline = |entry: &str, pass_layout: &wgpu::BindGroupLayout| {
++            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
++                label: Some(entry),
++                bind_group_layouts: &[Some(&globals_layout), Some(pass_layout)],
++                immediate_size: 0,
++            });
++            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
++                label: Some(entry),
++                layout: Some(&pl),
++                module: &module,
++                entry_point: Some(entry),
++                compilation_options: Default::default(),
++                cache: None,
++            })
++        };
++        let reconstruct = pipeline("reconstruct", &reconstruct_layout);
++        let mip = pipeline("luma_mip", &mip_layout);
++        let clip = pipeline("depth_clip_pass", &clip_layout);
++        let lock = pipeline("lock_pass", &lock_layout);
++        let accumulate = pipeline("accumulate", &accumulate_layout);
++        let params = device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("fsr2 params"),
++            size: 192,
++            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
++            mapped_at_creation: false,
++        });
++        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
++            label: Some("fsr2"),
++            mag_filter: wgpu::FilterMode::Linear,
++            min_filter: wgpu::FilterMode::Linear,
++            ..Default::default()
++        });
++        Self {
++            globals_layout,
++            reconstruct_layout,
++            mip_layout,
++            clip_layout,
++            lock_layout,
++            accumulate_layout,
++            reconstruct,
++            mip,
++            clip,
++            lock,
++            accumulate,
++            params,
++            sampler,
++            targets: None,
++            frame_index: 0,
++            last: None,
++        }
++    }
++
++    /// Forget the history (a new place, a cut).
++    pub fn reset(&mut self) {
++        self.last = None;
++    }
++
++    /// Upscales `color` (render size, the frame drawn with `frame`'s
++    /// jitter) to `out_size` with its depth; returns the result (8-bit,
++    /// before sharpening).
++    #[allow(clippy::too_many_arguments)]
++    pub fn run(
++        &mut self,
++        device: &wgpu::Device,
++        queue: &wgpu::Queue,
++        color: &wgpu::TextureView,
++        depth: &wgpu::TextureView,
++        render_size: [u32; 2],
++        out_size: [u32; 2],
++        frame: Frame,
++    ) -> &wgpu::TextureView {
++        use wgpu::TextureFormat as F;
++        let resized = self.targets.as_ref().is_none_or(|t| t.render_size != render_size || t.out_size != out_size);
++        if resized {
++            let r = render_size;
++            let o = out_size;
++            let m = [r[0].div_ceil(MIP_DIV).max(1), r[1].div_ceil(MIP_DIV).max(1)];
++            let pair = |label, size, format| [texture(device, label, size, format, false), texture(device, label, size, format, false)];
++            self.targets = Some(Targets {
++                render_size,
++                out_size,
++                mip_size: m,
++                depth: texture(device, "fsr2 dilated depth", r, F::R32Float, false),
++                mv: pair("fsr2 dilated motion", r, F::Rg32Float),
++                lock_luma: texture(device, "fsr2 lock luma", r, F::R32Float, false),
++                mip: texture(device, "fsr2 luma mip", m, F::R32Float, false),
++                prepared: texture(device, "fsr2 prepared colour", r, F::Rgba16Float, false),
++                masks: texture(device, "fsr2 reactive masks", r, F::Rgba16Float, false),
++                recon: device.create_buffer(&wgpu::BufferDescriptor {
++                    label: Some("fsr2 reconstructed depth"),
++                    size: (r[0].max(1) as u64) * (r[1].max(1) as u64) * 4,
++                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
++                    mapped_at_creation: false,
++                }),
++                new_locks: texture(device, "fsr2 new locks", o, F::R32Float, true),
++                history: pair("fsr2 history", o, F::Rgba16Float),
++                lock: pair("fsr2 lock status", o, F::Rgba16Float),
++                luma_history: pair("fsr2 luma history", o, F::Rgba8Unorm),
++                out: texture(device, "fsr2 output", o, F::Rgba8Unorm, false),
++            });
++            self.last = None;
++        }
++        // A cut (the camera jumped) starts the history over.
++        let reset = match self.last {
++            None => true,
++            Some(last) => last.cam_pos.distance(frame.cam_pos) > 40.0,
++        };
++        if reset {
++            self.frame_index = 0;
++        }
++        let t = self.targets.as_ref().expect("targets");
++        let prev_vp = self.last.map_or(frame.view_proj, |l| l.view_proj);
++        let mut params = [0f32; 48];
++        params[0] = render_size[0] as f32;
++        params[1] = render_size[1] as f32;
++        params[2] = out_size[0] as f32;
++        params[3] = out_size[1] as f32;
++        params[4] = frame.jitter[0];
++        params[5] = frame.jitter[1];
++        params[6] = self.frame_index as f32;
++        params[7] = phase_count(render_size[0], out_size[0]) as f32;
++        params[8..24].copy_from_slice(&frame.inv_view_proj_jittered.to_cols_array());
++        params[24..40].copy_from_slice(&prev_vp.to_cols_array());
++        params[40] = rustudio_core::mech::NEAR;
++        params[41] = METERS_PER_STUD;
++        params[42] = kfov(frame.inv_view_proj_jittered, frame.cam_pos);
++        params[44] = t.mip_size[0] as f32;
++        params[45] = t.mip_size[1] as f32;
++        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
++
++        let cur = (self.frame_index & 1) as usize;
++        let prev = 1 - cur;
++        let views = |layout: &wgpu::BindGroupLayout, views: &[&wgpu::TextureView], extra: Vec<wgpu::BindingResource>| {
++            let mut entries: Vec<wgpu::BindGroupEntry> = views
++                .iter()
++                .enumerate()
++                .map(|(i, v)| wgpu::BindGroupEntry { binding: i as u32, resource: wgpu::BindingResource::TextureView(v) })
++                .collect();
++            for r in extra {
++                entries.push(wgpu::BindGroupEntry { binding: entries.len() as u32, resource: r });
++            }
++            device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("fsr2"), layout, entries: &entries })
++        };
++        let globals = device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("fsr2 params"),
++            layout: &self.globals_layout,
++            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.params.as_entire_binding() }],
++        });
++        let reconstruct_bg = views(
++            &self.reconstruct_layout,
++            &[color, depth, &t.depth.view, &t.mv[cur].view, &t.lock_luma.view],
++            vec![t.recon.as_entire_binding()],
++        );
++        let mip_bg = views(&self.mip_layout, &[color, &t.mip.view], vec![]);
++        let clip_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("fsr2 depth clip"),
++            layout: &self.clip_layout,
++            entries: &[
++                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(color) },
++                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&t.depth.view) },
++                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&t.mv[cur].view) },
++                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&t.mv[prev].view) },
++                wgpu::BindGroupEntry { binding: 4, resource: t.recon.as_entire_binding() },
++                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&t.prepared.view) },
++                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&t.masks.view) },
++            ],
++        });
++        let lock_bg = views(&self.lock_layout, &[&t.lock_luma.view, &t.new_locks.view], vec![]);
++        let accumulate_bg = views(
++            &self.accumulate_layout,
++            &[
++                &t.prepared.view,
++                &t.masks.view,
++                &t.mv[cur].view,
++                &t.history[prev].view,
++                &t.lock[prev].view,
++                &t.luma_history[prev].view,
++                &t.new_locks.view,
++                &t.mip.view,
++                &t.history[cur].view,
++                &t.lock[cur].view,
++                &t.luma_history[cur].view,
++                &t.out.view,
++            ],
++            vec![wgpu::BindingResource::Sampler(&self.sampler)],
++        );
++        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("fsr2") });
++        // The new locks and the reconstructed depth (0 = far, reverse-Z)
++        // start over each frame.
++        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
++            label: Some("fsr2 clear locks"),
++            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
++                view: &t.new_locks.view,
++                depth_slice: None,
++                resolve_target: None,
++                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
++            })],
++            depth_stencil_attachment: None,
++            timestamp_writes: None,
++            occlusion_query_set: None,
++            multiview_mask: None,
++        }));
++        encoder.clear_buffer(&t.recon, 0, None);
++        let groups = |n: u32| n.div_ceil(8);
++        let mip_groups = t.mip_size;
++        for (pipeline, bg, dispatch) in [
++            (&self.reconstruct, &reconstruct_bg, [groups(render_size[0]), groups(render_size[1])]),
++            (&self.mip, &mip_bg, mip_groups),
++            (&self.clip, &clip_bg, [groups(render_size[0]), groups(render_size[1])]),
++            (&self.lock, &lock_bg, [groups(render_size[0]), groups(render_size[1])]),
++            (&self.accumulate, &accumulate_bg, [groups(out_size[0]), groups(out_size[1])]),
++        ] {
++            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fsr2"), timestamp_writes: None });
++            pass.set_pipeline(pipeline);
++            pass.set_bind_group(0, &globals, &[]);
++            pass.set_bind_group(1, bg, &[]);
++            pass.dispatch_workgroups(dispatch[0], dispatch[1], 1);
++        }
++        queue.submit([encoder.finish()]);
++        self.last = Some(frame);
++        self.frame_index = self.frame_index.wrapping_add(1).max(1);
++        &self.targets.as_ref().expect("targets").out.view
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn jitter_stays_inside_a_pixel_and_covers_it() {
++        let mut f = (0..64).map(|i| [halton(i % 8 + 1, 2) - 0.5, halton(i % 8 + 1, 3) - 0.5]);
++        assert!(f.all(|j| j.iter().all(|v| (-0.5..=0.5).contains(v))));
++        assert_eq!(phase_count(1280, 1280), 8);
++        assert_eq!(phase_count(640, 1280), 32);
++    }
++
++    #[test]
++    fn kfov_grows_with_the_field_of_view() {
++        let eye = Vec3::new(0.0, 5.0, 10.0);
++        let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
++        let k = |fov: f32| kfov((Mat4::perspective_infinite_reverse_rh(fov, 16.0 / 9.0, 0.1) * view).inverse(), eye);
++        let (narrow, wide) = (k(0.5), k(1.4));
++        assert!(narrow > 1.0 && wide > narrow, "{narrow} {wide}");
++        // sqrt(1 + tan²(fx/2) + tan²(fy/2)) for a 70° vertical field of view.
++        let ty = (70f32.to_radians() / 2.0).tan();
++        let expected = (1.0 + ty * ty + (ty * 16.0 / 9.0).powi(2)).sqrt();
++        assert!((k(70f32.to_radians()) - expected).abs() < 1e-3);
++    }
++}
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/fsr3.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/fsr3.rs
+--- a/crates/rustudio-render/src/fsr3.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/crates/rustudio-render/src/fsr3.rs	2026-11-22 12:19:42.310657799 -0600
+@@ -0,0 +1,756 @@
++//! (RustLauncher) Temporal upscaling after AMD FidelityFX Super Resolution
++//! 3.1's upscaler (FSR SDK 2.4.0, `upscalers/fsr3`, MIT licence:
++//! Copyright (C) 2026 Advanced Micro Devices, Inc.), ported to WGSL compute
++//! for wgpu. The passes and their maths follow the SDK's:
++//!
++//! 1. **prepare** (render size): depth extents over 3×3, the nearest
++//!    sample's motion vector (dilation), linear depth, luma;
++//! 2. **reactivity** (render size): disocclusion from the depth separation
++//!    test (`ComputeDisocclusions`, Ksep = 1.37e-5), shading change,
++//!    per-pixel accumulation (`UpdateAccumulation`: +1/3 a frame, down to
++//!    -1/3 on disocclusion), thin-feature locks (`ComputeThinFeatureConfidence`);
++//! 3. **accumulate** (output size): history reprojected (bicubic), the
++//!    current frame upsampled with a Lanczos-2 kernel over 4×4 jittered
++//!    samples, a variance rectification box, lock lifetime, weighted blend
++//!    (`ComputeUpsampledColorAndWeight`, `RectifyHistory`, `Accumulate`).
++//!
++//! Then RCAS (finish.rs). Adapted to rustudio, and simpler than the SDK in
++//! these places:
++//! - the input is the finished display image (8-bit, after post), so the
++//!   exposure is 1 and nothing is tonemapped;
++//! - motion vectors are the camera's, from depth and this and the last
++//!   frame's view-projection (rustudio draws no per-object velocity); what
++//!   moves on its own is left to the rectification box;
++//! - the previous frame's depth is kept instead of reconstructed, and
++//!   shading change compares this frame's luma with the last one's, without
++//!   the SDK's luma pyramids and luma instability pass.
++//!
++//! The jitter comes from `escalado` (Halton 2,3, FSR's phase count).
++
++use crate::fsr2::{Frame, phase_count};
++use egui_wgpu::wgpu;
++
++/// Studs to metres (FSR's thresholds are in metres).
++const METERS_PER_STUD: f32 = 0.28;
++
++const SHADER: &str = r#"
++struct P {
++    render_size: vec2<f32>,
++    out_size: vec2<f32>,
++    jitter: vec2<f32>,
++    frame_index: f32,
++    phases: f32,
++    inv_vp: mat4x4<f32>,
++    prev_vp: mat4x4<f32>,
++    near: f32,
++    meters: f32,
++    reset: f32,
++    pad: f32,
++};
++@group(0) @binding(0) var<uniform> p: P;
++
++const FP16_MIN: f32 = 6.10e-05;
++const EPS: f32 = 6.10e-05;
++const LOCK_THRESHOLD: f32 = 1.0;
++const LOCK_MAX: f32 = 2.0;
++const PI: f32 = 3.141592653589793;
++
++fn rs() -> vec2<i32> { return vec2<i32>(p.render_size); }
++fn os() -> vec2<i32> { return vec2<i32>(p.out_size); }
++fn clamp_px(q: vec2<i32>, size: vec2<i32>) -> vec2<i32> {
++    return clamp(q, vec2<i32>(0), size - vec2<i32>(1));
++}
++fn on_screen(q: vec2<i32>, size: vec2<i32>) -> bool {
++    return all(q >= vec2<i32>(0)) && all(q < size);
++}
++fn uv_inside(uv: vec2<f32>) -> bool {
++    return all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
++}
++fn luma(c: vec3<f32>) -> f32 {
++    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
++}
++fn rgb_to_ycocg(c: vec3<f32>) -> vec3<f32> {
++    return vec3<f32>(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
++}
++fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
++    return vec3<f32>(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
++}
++fn velocity_4k(mv: vec2<f32>) -> f32 {
++    return length(mv * vec2<f32>(3840.0, 2160.0));
++}
++// FSR: motion under this many 4K pixels counts as none (depth reconstruction).
++fn mv_px_threshold(near_m: f32) -> f32 {
++    return mix(0.25, 0.75, clamp(near_m / 100.0, 0.0, 1.0));
++}
++fn view_depth(d: f32) -> f32 {
++    // Infinite reverse-Z: device depth = NEAR / view depth.
++    return min(p.near / max(d, 1e-7), 65504.0);
++}
++
++// ------------------------------------------------------------ 1. prepare
++
++@group(1) @binding(0) var in_color: texture_2d<f32>;
++@group(1) @binding(1) var in_depth: texture_depth_2d;
++@group(1) @binding(2) var out_mv: texture_storage_2d<rg32float, write>;
++@group(1) @binding(3) var out_depth: texture_storage_2d<r32float, write>;
++@group(1) @binding(4) var out_luma: texture_storage_2d<r32float, write>;
++@group(1) @binding(5) var out_far: texture_storage_2d<r32float, write>;
++
++@compute @workgroup_size(8, 8)
++fn prepare(@builtin(global_invocation_id) id: vec3<u32>) {
++    let px = vec2<i32>(id.xy);
++    let size = rs();
++    if (!on_screen(px, size)) { return; }
++    // Depth extents (FindDepthExtents): reverse-Z, so the nearest is the largest.
++    var nearest = textureLoad(in_depth, px, 0);
++    var nearest_px = px;
++    var farthest = nearest;
++    for (var y = -1; y <= 1; y++) {
++        for (var x = -1; x <= 1; x++) {
++            let q = px + vec2<i32>(x, y);
++            if (!on_screen(q, size)) { continue; }
++            let d = textureLoad(in_depth, q, 0);
++            if (d > nearest) { nearest = d; nearest_px = q; }
++            farthest = min(farthest, d);
++        }
++    }
++    // The nearest sample's motion (DilateMotionVector), from the camera:
++    // where its surface point was on screen last frame, unjittered.
++    let uv = (vec2<f32>(nearest_px) + 0.5) / p.render_size;
++    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
++    let h = p.inv_vp * vec4<f32>(ndc, max(nearest, 1e-7), 1.0);
++    let world = h.xyz / h.w;
++    let prev = p.prev_vp * vec4<f32>(world, 1.0);
++    var mv = vec2<f32>(0.0);
++    if (prev.w > 1e-6) {
++        let pn = prev.xy / prev.w;
++        let prev_uv = vec2<f32>(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
++        let cur_uv = (vec2<f32>(nearest_px) + 0.5 - p.jitter) / p.render_size;
++        mv = prev_uv - cur_uv;
++    }
++    textureStore(out_mv, px, vec4<f32>(mv, 0.0, 0.0));
++    textureStore(out_depth, px, vec4<f32>(view_depth(nearest), 0.0, 0.0, 0.0));
++    textureStore(out_far, px, vec4<f32>(view_depth(farthest) * p.meters, 0.0, 0.0, 0.0));
++    let c = max(textureLoad(in_color, px, 0).rgb, vec3<f32>(0.0));
++    textureStore(out_luma, px, vec4<f32>(luma(c), 0.0, 0.0, 0.0));
++}
++
++// ------------------------------------------------------------ 2. reactivity
++
++@group(1) @binding(0) var r_mv: texture_2d<f32>;
++@group(1) @binding(1) var r_depth: texture_2d<f32>;
++@group(1) @binding(2) var r_prev_depth: texture_2d<f32>;
++@group(1) @binding(3) var r_luma: texture_2d<f32>;
++@group(1) @binding(4) var r_prev_luma: texture_2d<f32>;
++@group(1) @binding(5) var r_prev_acc: texture_2d<f32>;
++@group(1) @binding(6) var r_out_acc: texture_storage_2d<r32float, write>;
++@group(1) @binding(7) var r_out_masks: texture_storage_2d<rgba16float, write>;
++@group(1) @binding(8) var r_out_locks: texture_storage_2d<r32float, write>;
++
++struct Bilinear { base: vec2<i32>, w: vec4<f32> };
++// GetBilinearSamplingData: the four texels around uv and their weights
++// (offsets (0,0), (1,0), (0,1), (1,1)).
++fn bilinear(uv: vec2<f32>, size: vec2<f32>) -> Bilinear {
++    let pos = uv * size - 0.5;
++    let base = floor(pos);
++    let f = pos - base;
++    return Bilinear(vec2<i32>(base), vec4<f32>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y));
++}
++fn corner(i: i32) -> vec2<i32> {
++    return vec2<i32>(i & 1, i >> 1);
++}
++fn load_bilinear(t: texture_2d<f32>, uv: vec2<f32>) -> f32 {
++    let size = rs();
++    let b = bilinear(uv, p.render_size);
++    var s = 0.0;
++    for (var i = 0; i < 4; i++) {
++        s += textureLoad(t, clamp_px(b.base + corner(i), size), 0).r * b.w[i];
++    }
++    return s;
++}
++
++// ComputeDisocclusions: the surface here was hidden last frame when it is
++// farther than what the last frame had there, by more than Ksep x the half
++// viewport (in pixels) x the depth.
++fn disocclusion(uv: vec2<f32>, mv_in: vec2<f32>, cur_z: f32) -> f32 {
++    let near_m = cur_z * p.meters;
++    let mv = mv_in * f32(velocity_4k(mv_in) > mv_px_threshold(near_m));
++    let b = bilinear(uv + mv, p.render_size);
++    let size = rs();
++    var dis = 0.0;
++    var wsum = 0.0;
++    var potential = true;
++    for (var i = 0; i < 4; i++) {
++        if (!potential) { break; }
++        let q = clamp_px(b.base + corner(i), size);
++        let w = b.w[i];
++        if (w > EPS * 10.0) {
++            let prev_z = textureLoad(r_prev_depth, q, 0).r;
++            let diff = cur_z - prev_z;
++            potential = potential && diff > 1.175494351e-38;
++            if (potential) {
++                let half_viewport = length(p.render_size * 0.5);
++                let required = 1.37e-05 * half_viewport * max(cur_z, prev_z);
++                dis += clamp(required / diff, 0.0, 1.0) * w;
++                wsum += w;
++            }
++        }
++    }
++    return select(0.0, clamp(1.0 - dis / wsum, 0.0, 1.0), potential && wsum > 0.0);
++}
++
++// ComputeThinFeatureConfidence: a one-pixel ridge (lines, wires, text)
++// the history should keep instead of the jittered frame's flicker.
++fn thin_feature(px: vec2<i32>) -> f32 {
++    let size = rs();
++    var s: array<f32, 9>;
++    var offs = array<vec2<i32>, 9>(
++        vec2<i32>(0, 0), vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1),
++        vec2<i32>(-1, 0), vec2<i32>(1, 0), vec2<i32>(-1, 1), vec2<i32>(0, 1), vec2<i32>(1, 1));
++    var lo = 3.4e38;
++    var hi = 1.175494351e-38;
++    for (var i = 0; i < 9; i++) {
++        s[i] = textureLoad(r_luma, clamp_px(px + offs[i], size), 0).r;
++        lo = min(lo, s[i]);
++        hi = max(hi, s[i]);
++    }
++    var dis_lo = 3.4e38;
++    var dis_hi = 0.0;
++    var pattern = 1u;
++    for (var i = 1; i < 9; i++) {
++        let d = abs(s[i] - s[0]) / max(hi - lo, 1e-8);
++        if (d < 0.9) {
++            pattern |= 1u << u32(i);
++        } else {
++            dis_lo = min(dis_lo, s[i]);
++            dis_hi = max(dis_hi, s[i]);
++        }
++    }
++    let ridge = s[0] > dis_hi || s[0] < dis_lo;
++    if (!ridge) { return 0.0; }
++    var masks = array<u32, 4>(
++        (1u << 1u) | (1u << 2u) | (1u << 4u) | 1u,
++        (1u << 2u) | (1u << 3u) | (1u << 5u) | 1u,
++        (1u << 4u) | (1u << 6u) | (1u << 7u) | 1u,
++        (1u << 5u) | (1u << 7u) | (1u << 8u) | 1u);
++    for (var i = 0; i < 4; i++) {
++        if ((pattern & masks[i]) == masks[i]) { return 0.0; }
++    }
++    return 1.0 - lo / max(hi, 1e-8);
++}
++
++@compute @workgroup_size(8, 8)
++fn reactivity(@builtin(global_invocation_id) id: vec3<u32>) {
++    let px = vec2<i32>(id.xy);
++    let size = rs();
++    if (!on_screen(px, size)) { return; }
++    let uv = (vec2<f32>(px) + 0.5) / p.render_size;
++    let mv = textureLoad(r_mv, px, 0).xy;
++    let cur_z = textureLoad(r_depth, px, 0).r;
++    let reset = p.reset > 0.5;
++    let reproj = uv + mv;
++    let inside = uv_inside(reproj) && !reset;
++    let dis = select(0.0, disocclusion(uv, mv, cur_z), inside);
++    // Shading change: this frame's luma (3x3, so the jitter's edge flicker
++    // does not count) against the last frame's where this surface was.
++    var shading = 0.0;
++    if (inside) {
++        var cur = 0.0;
++        for (var y = -1; y <= 1; y++) {
++            for (var x = -1; x <= 1; x++) {
++                cur += textureLoad(r_luma, clamp_px(px + vec2<i32>(x, y), size), 0).r;
++            }
++        }
++        cur /= 9.0;
++        let prev = load_bilinear(r_prev_luma, reproj);
++        let rel = abs(cur - prev) / max(max(cur, prev), 0.05);
++        shading = clamp((rel - 0.12) * 2.5, 0.0, 1.0) * (1.0 - dis);
++    }
++    // UpdateAccumulation.
++    var acc = 0.0;
++    if (inside) {
++        acc = clamp(load_bilinear(r_prev_acc, reproj), 0.0, 1.0);
++    }
++    acc = mix(acc, 0.0, shading);
++    acc = mix(acc, min(-1.0 / 3.0, acc), dis);
++    acc *= f32(round(acc * 100.0) > 1.0);
++    textureStore(r_out_acc, px, vec4<f32>(clamp(acc + 1.0 / 3.0, 0.0, 1.0), 0.0, 0.0, 0.0));
++    textureStore(r_out_masks, px, vec4<f32>(0.0, dis, shading, acc));
++    // New locks, at the output pixel this sample lands on.
++    let lock = thin_feature(px);
++    if (lock > 0.01) {
++        let hr = vec2<i32>(floor((vec2<f32>(px) + 0.5 - p.jitter) / p.render_size * p.out_size));
++        if (on_screen(hr, os())) {
++            textureStore(r_out_locks, hr, vec4<f32>(lock, 0.0, 0.0, 0.0));
++        }
++    }
++}
++
++// ------------------------------------------------------------ 3. accumulate
++
++@group(1) @binding(0) var a_color: texture_2d<f32>;
++@group(1) @binding(1) var a_mv: texture_2d<f32>;
++@group(1) @binding(2) var a_masks: texture_2d<f32>;
++@group(1) @binding(3) var a_far: texture_2d<f32>;
++@group(1) @binding(4) var a_history: texture_2d<f32>;
++@group(1) @binding(5) var a_locks: texture_2d<f32>;
++@group(1) @binding(6) var a_out_history: texture_storage_2d<rgba16float, write>;
++@group(1) @binding(7) var a_out: texture_storage_2d<rgba8unorm, write>;
++@group(1) @binding(8) var a_sampler: sampler;
++
++fn lanczos2(x0: f32) -> f32 {
++    let x = min(abs(x0), 2.0);
++    if (x < EPS) { return 1.0; }
++    return (sin(PI * x) / (PI * x)) * (sin(0.5 * PI * x) / (0.5 * PI * x));
++}
++
++// The history at uv, Catmull-Rom bicubic over 4x4 texels.
++fn history_sample(uv: vec2<f32>) -> vec4<f32> {
++    let size = os();
++    let pos = uv * p.out_size - 0.5;
++    let base = floor(pos);
++    let f = pos - base;
++    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
++    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
++    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
++    let w3 = f * f * (-0.5 + 0.5 * f);
++    var wx = array<f32, 4>(w0.x, w1.x, w2.x, w3.x);
++    var wy = array<f32, 4>(w0.y, w1.y, w2.y, w3.y);
++    var s = vec4<f32>(0.0);
++    for (var y = 0; y < 4; y++) {
++        for (var x = 0; x < 4; x++) {
++            let q = clamp_px(vec2<i32>(base) + vec2<i32>(x - 1, y - 1), size);
++            s += textureLoad(a_history, q, 0) * (wx[x] * wy[y]);
++        }
++    }
++    return max(s, vec4<f32>(0.0));
++}
++
++@compute @workgroup_size(8, 8)
++fn accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
++    let hr = vec2<i32>(id.xy);
++    let out_size = os();
++    if (!on_screen(hr, out_size)) { return; }
++    let size = rs();
++    let downscale = p.render_size / p.out_size;
++    // InitPassData.
++    let hr_uv = (vec2<f32>(hr) + 0.5) / p.out_size;
++    let lr_uv_j = hr_uv + p.jitter / p.render_size;
++    let lr_px = clamp_px(vec2<i32>(hr_uv * p.render_size), size);
++    let mv = textureLoad(a_mv, lr_px, 0).xy;
++    let vel4k = velocity_4k(mv);
++    let reproj = hr_uv + mv;
++    let existing = uv_inside(reproj);
++    let farthest_m = textureLoad(a_far, clamp_px(vec2<i32>(lr_uv_j * p.render_size), size), 0).r;
++    let is_new = !existing || p.frame_index < 0.5 || p.reset > 0.5;
++    let lr_uv_hw = clamp(lr_uv_j * p.render_size, vec2<f32>(0.5), p.render_size - 0.5) / p.render_size;
++    let masks = textureSampleLevel(a_masks, a_sampler, lr_uv_hw, 0.0);
++    let reactive = clamp(masks.x, 0.0, 1.0);
++    let dis = clamp(masks.y, 0.0, 1.0);
++    let shading = clamp(masks.z, 0.0, 1.0);
++    var acc = clamp(masks.w, 0.0, 1.0);
++    acc *= f32(round(acc * 100.0) > 1.0);
++
++    // ReprojectHistoryColor.
++    var hist = vec3<f32>(0.0);
++    var lock = 0.0;
++    if (existing && !is_new) {
++        let h = history_sample(reproj);
++        hist = rgb_to_ycocg(h.rgb);
++        lock = h.w;
++    }
++    // UpdateLockStatus.
++    lock *= f32(!is_new);
++    let life_dec = max(shading, max(reactive, dis));
++    lock = max(0.0, lock - life_dec * LOCK_MAX);
++    let lock_contrib = clamp(clamp(lock - LOCK_THRESHOLD, 0.0, 1.0) * (LOCK_MAX - LOCK_THRESHOLD), 0.0, 1.0);
++    let new_lock = textureLoad(a_locks, hr, 0).r * (1.0 - reactive);
++    lock = max(0.0, min(lock + new_lock, LOCK_MAX));
++    lock = max(0.0, lock - (0.1 / max(p.phases, 1.0)) * (1.0 - life_dec));
++    lock *= f32(uv_inside(hr_uv - mv));
++    // ComputeBaseAccumulationWeight.
++    var hist_w = acc;
++    hist_w = min(hist_w, mix(hist_w, 0.15, clamp(max(0.0, vel4k / 0.5), 0.0, 1.0)));
++
++    // ComputeUpsampledColorAndWeight: Lanczos-2 over the 4x4 jittered samples
++    // around this output pixel, and their rectification box.
++    let src_out = (vec2<f32>(hr) + 0.5) * downscale;
++    let src_in = vec2<i32>(floor(src_out));
++    let src_unj = vec2<f32>(src_in) + 0.5 - p.jitter;
++    let base_off = src_unj - src_out;
++    let tl = vec2<i32>(select(-1, -2, src_unj.x > src_out.x), select(-1, -2, src_unj.y > src_out.y));
++    let kernel_bias = min(1.99, 1.0 / downscale.x);
++    var up = vec3<f32>(0.0);
++    var up_w = 0.0;
++    var box_min = vec3<f32>(0.0);
++    var box_max = vec3<f32>(0.0);
++    var box_center = vec3<f32>(0.0);
++    var box_vec = vec3<f32>(0.0);
++    var box_w = 0.0;
++    for (var row = 0; row < 4; row++) {
++        for (var col = 0; col < 4; col++) {
++            let o = tl + vec2<i32>(col, row);
++            let q = src_in + o;
++            let onscreen = f32(on_screen(q, size));
++            let s = rgb_to_ycocg(max(textureLoad(a_color, clamp_px(q, size), 0).rgb, vec3<f32>(0.0)));
++            let off = base_off + vec2<f32>(o);
++            let w = onscreen * lanczos2(length(off * kernel_bias));
++            up += s * w;
++            up_w += w;
++            let bw = exp(-2.3 * dot(off, off)) * onscreen;
++            if (row == 0 && col == 0) {
++                box_min = s; box_max = s;
++                box_center = s * bw; box_vec = s * s * bw; box_w = bw;
++            } else {
++                box_min = min(box_min, s); box_max = max(box_max, s);
++                box_center += s * bw; box_vec += s * s * bw; box_w += bw;
++            }
++        }
++    }
++    box_w = select(1.0, box_w, abs(box_w) > 1.175494351e-38);
++    box_center /= box_w;
++    box_vec = sqrt(abs(box_vec / box_w - box_center * box_center));
++    up_w *= f32(up_w > EPS);
++    if (up_w > EPS) {
++        up /= up_w;
++        up_w *= 0.74 / 16.0;
++        up = clamp(up, box_min, box_max);
++    }
++    if (acc == 0.0) {
++        up = box_center;
++        up_w = 1.0;
++        hist_w = 0.0;
++    }
++
++    // RectifyHistory.
++    let vel_f = clamp(vel4k / 20.0, 0.0, 1.0);
++    let dist_f = clamp(0.75 - farthest_m / 20.0, 0.0, 1.0);
++    let box_t = max(vel_f, max(dist_f, max(1.0 - acc, max(sqrt(reactive), shading))));
++    let box_scale = mix(3.0, 1.0, box_t);
++    let scaled = box_vec * vec3<f32>(1.7, 1.0, 1.0) * box_scale;
++    let clamped_scaled = max(scaled, vec3<f32>(1.193e-7));
++    let t = (hist - box_center) / clamped_scaled;
++    if (length(t) > 1.0) {
++        let clipped = normalize(t) * scaled + box_center;
++        let contribution = lock_contrib * acc * (1.0 - dis);
++        hist = mix(clipped, hist, clamp(contribution, 0.0, 1.0));
++    }
++
++    // Accumulate.
++    hist_w *= f32(hist_w > FP16_MIN);
++    hist_w = max(EPS, hist_w + up_w);
++    let alpha = clamp(up_w / hist_w, 0.0, 1.0);
++    let rgb = max(ycocg_to_rgb(mix(hist, up, alpha)), vec3<f32>(0.0));
++    textureStore(a_out_history, hr, vec4<f32>(rgb, lock));
++    textureStore(a_out, hr, vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
++}
++"#;
++
++struct Tex {
++    _tex: wgpu::Texture,
++    view: wgpu::TextureView,
++}
++
++fn texture(device: &wgpu::Device, label: &str, size: [u32; 2], format: wgpu::TextureFormat, render: bool) -> Tex {
++    let mut usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
++    if render {
++        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
++    }
++    let tex = device.create_texture(&wgpu::TextureDescriptor {
++        label: Some(label),
++        size: wgpu::Extent3d { width: size[0].max(1), height: size[1].max(1), depth_or_array_layers: 1 },
++        mip_level_count: 1,
++        sample_count: 1,
++        dimension: wgpu::TextureDimension::D2,
++        format,
++        usage,
++        view_formats: &[],
++    });
++    let view = tex.create_view(&Default::default());
++    Tex { _tex: tex, view }
++}
++
++struct Targets {
++    render_size: [u32; 2],
++    out_size: [u32; 2],
++    mv: Tex,
++    far: Tex,
++    masks: Tex,
++    /// Ping-ponged: this frame's and the last one's.
++    depth: [Tex; 2],
++    luma: [Tex; 2],
++    acc: [Tex; 2],
++    history: [Tex; 2],
++    locks: Tex,
++    out: Tex,
++}
++
++pub struct Fsr3 {
++    globals_layout: wgpu::BindGroupLayout,
++    prepare_layout: wgpu::BindGroupLayout,
++    reactivity_layout: wgpu::BindGroupLayout,
++    accumulate_layout: wgpu::BindGroupLayout,
++    prepare: wgpu::ComputePipeline,
++    reactivity: wgpu::ComputePipeline,
++    accumulate: wgpu::ComputePipeline,
++    params: wgpu::Buffer,
++    sampler: wgpu::Sampler,
++    targets: Option<Targets>,
++    frame_index: u32,
++    last: Option<Frame>,
++}
++
++impl Fsr3 {
++    pub fn new(device: &wgpu::Device) -> Self {
++        use wgpu::{BindGroupLayoutEntry as E, BindingType as T, ShaderStages as S};
++        let tex = |binding, sample_type| E {
++            binding,
++            visibility: S::COMPUTE,
++            ty: T::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
++            count: None,
++        };
++        let unfilterable = wgpu::TextureSampleType::Float { filterable: false };
++        let filterable = wgpu::TextureSampleType::Float { filterable: true };
++        let store = |binding, format| E {
++            binding,
++            visibility: S::COMPUTE,
++            ty: T::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format, view_dimension: wgpu::TextureViewDimension::D2 },
++            count: None,
++        };
++        use wgpu::TextureFormat as F;
++        let layout = |label, entries: &[E]| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries });
++        let globals_layout = layout(
++            "fsr3 params",
++            &[E {
++                binding: 0,
++                visibility: S::COMPUTE,
++                ty: T::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
++                count: None,
++            }],
++        );
++        let prepare_layout = layout(
++            "fsr3 prepare",
++            &[
++                tex(0, unfilterable),
++                tex(1, wgpu::TextureSampleType::Depth),
++                store(2, F::Rg32Float),
++                store(3, F::R32Float),
++                store(4, F::R32Float),
++                store(5, F::R32Float),
++            ],
++        );
++        let reactivity_layout = layout(
++            "fsr3 reactivity",
++            &[
++                tex(0, unfilterable),
++                tex(1, unfilterable),
++                tex(2, unfilterable),
++                tex(3, unfilterable),
++                tex(4, unfilterable),
++                tex(5, unfilterable),
++                store(6, F::R32Float),
++                store(7, F::Rgba16Float),
++                store(8, F::R32Float),
++            ],
++        );
++        let accumulate_layout = layout(
++            "fsr3 accumulate",
++            &[
++                tex(0, unfilterable),
++                tex(1, unfilterable),
++                tex(2, filterable),
++                tex(3, unfilterable),
++                tex(4, unfilterable),
++                tex(5, unfilterable),
++                store(6, F::Rgba16Float),
++                store(7, F::Rgba8Unorm),
++                E { binding: 8, visibility: S::COMPUTE, ty: T::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
++            ],
++        );
++        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
++            label: Some("fsr3"),
++            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
++        });
++        let pipeline = |entry: &str, pass_layout: &wgpu::BindGroupLayout| {
++            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
++                label: Some(entry),
++                bind_group_layouts: &[Some(&globals_layout), Some(pass_layout)],
++                immediate_size: 0,
++            });
++            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
++                label: Some(entry),
++                layout: Some(&pl),
++                module: &module,
++                entry_point: Some(entry),
++                compilation_options: Default::default(),
++                cache: None,
++            })
++        };
++        let prepare = pipeline("prepare", &prepare_layout);
++        let reactivity = pipeline("reactivity", &reactivity_layout);
++        let accumulate = pipeline("accumulate", &accumulate_layout);
++        let params = device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("fsr3 params"),
++            size: 176,
++            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
++            mapped_at_creation: false,
++        });
++        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
++            label: Some("fsr3"),
++            mag_filter: wgpu::FilterMode::Linear,
++            min_filter: wgpu::FilterMode::Linear,
++            ..Default::default()
++        });
++        Self {
++            globals_layout,
++            prepare_layout,
++            reactivity_layout,
++            accumulate_layout,
++            prepare,
++            reactivity,
++            accumulate,
++            params,
++            sampler,
++            targets: None,
++            frame_index: 0,
++            last: None,
++        }
++    }
++
++    /// Forget the history (a new place, a cut).
++    pub fn reset(&mut self) {
++        self.last = None;
++    }
++
++    /// Upscales `color` (render size, the frame drawn with `frame`'s
++    /// jitter) to `out_size` with its depth; returns the result (8-bit,
++    /// before sharpening).
++    #[allow(clippy::too_many_arguments)]
++    pub fn run(
++        &mut self,
++        device: &wgpu::Device,
++        queue: &wgpu::Queue,
++        color: &wgpu::TextureView,
++        depth: &wgpu::TextureView,
++        render_size: [u32; 2],
++        out_size: [u32; 2],
++        frame: Frame,
++    ) -> &wgpu::TextureView {
++        use wgpu::TextureFormat as F;
++        let resized = self.targets.as_ref().is_none_or(|t| t.render_size != render_size || t.out_size != out_size);
++        if resized {
++            let r = render_size;
++            let o = out_size;
++            self.targets = Some(Targets {
++                render_size,
++                out_size,
++                mv: texture(device, "fsr3 motion", r, F::Rg32Float, false),
++                far: texture(device, "fsr3 farthest", r, F::R32Float, false),
++                masks: texture(device, "fsr3 masks", r, F::Rgba16Float, false),
++                depth: [texture(device, "fsr3 depth", r, F::R32Float, false), texture(device, "fsr3 depth", r, F::R32Float, false)],
++                luma: [texture(device, "fsr3 luma", r, F::R32Float, false), texture(device, "fsr3 luma", r, F::R32Float, false)],
++                acc: [texture(device, "fsr3 accumulation", r, F::R32Float, false), texture(device, "fsr3 accumulation", r, F::R32Float, false)],
++                history: [texture(device, "fsr3 history", o, F::Rgba16Float, false), texture(device, "fsr3 history", o, F::Rgba16Float, false)],
++                locks: texture(device, "fsr3 new locks", o, F::R32Float, true),
++                out: texture(device, "fsr3 output", o, F::Rgba8Unorm, false),
++            });
++            self.last = None;
++        }
++        // A cut (the camera jumped) starts the history over.
++        let reset = match self.last {
++            None => true,
++            Some(last) => last.cam_pos.distance(frame.cam_pos) > 40.0,
++        };
++        if reset {
++            self.frame_index = 0;
++        }
++        let prev_vp = self.last.map_or(frame.view_proj, |l| l.view_proj);
++        let mut params = [0f32; 44];
++        params[0] = render_size[0] as f32;
++        params[1] = render_size[1] as f32;
++        params[2] = out_size[0] as f32;
++        params[3] = out_size[1] as f32;
++        params[4] = frame.jitter[0];
++        params[5] = frame.jitter[1];
++        params[6] = self.frame_index as f32;
++        params[7] = phase_count(render_size[0], out_size[0]) as f32;
++        params[8..24].copy_from_slice(&frame.inv_view_proj_jittered.to_cols_array());
++        params[24..40].copy_from_slice(&prev_vp.to_cols_array());
++        params[40] = rustudio_core::mech::NEAR;
++        params[41] = METERS_PER_STUD;
++        params[42] = if reset { 1.0 } else { 0.0 };
++        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
++
++        let t = self.targets.as_ref().expect("targets");
++        let cur = (self.frame_index & 1) as usize;
++        let prev = 1 - cur;
++        let group = |layout: &wgpu::BindGroupLayout, views: &[&wgpu::TextureView], sampler: Option<&wgpu::Sampler>| {
++            let mut entries: Vec<wgpu::BindGroupEntry> = views
++                .iter()
++                .enumerate()
++                .map(|(i, v)| wgpu::BindGroupEntry { binding: i as u32, resource: wgpu::BindingResource::TextureView(v) })
++                .collect();
++            if let Some(s) = sampler {
++                entries.push(wgpu::BindGroupEntry { binding: views.len() as u32, resource: wgpu::BindingResource::Sampler(s) });
++            }
++            device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("fsr3"), layout, entries: &entries })
++        };
++        let globals = device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("fsr3 params"),
++            layout: &self.globals_layout,
++            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.params.as_entire_binding() }],
++        });
++        let prepare_bg = group(&self.prepare_layout, &[color, depth, &t.mv.view, &t.depth[cur].view, &t.luma[cur].view, &t.far.view], None);
++        let reactivity_bg = group(
++            &self.reactivity_layout,
++            &[
++                &t.mv.view,
++                &t.depth[cur].view,
++                &t.depth[prev].view,
++                &t.luma[cur].view,
++                &t.luma[prev].view,
++                &t.acc[prev].view,
++                &t.acc[cur].view,
++                &t.masks.view,
++                &t.locks.view,
++            ],
++            None,
++        );
++        let accumulate_bg = group(
++            &self.accumulate_layout,
++            &[color, &t.mv.view, &t.masks.view, &t.far.view, &t.history[prev].view, &t.locks.view, &t.history[cur].view, &t.out.view],
++            Some(&self.sampler),
++        );
++        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("fsr3") });
++        // The new locks start at zero each frame.
++        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
++            label: Some("fsr3 clear locks"),
++            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
++                view: &t.locks.view,
++                depth_slice: None,
++                resolve_target: None,
++                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
++            })],
++            depth_stencil_attachment: None,
++            timestamp_writes: None,
++            occlusion_query_set: None,
++            multiview_mask: None,
++        }));
++        let groups = |n: u32| n.div_ceil(8);
++        for (pipeline, bg, size) in [
++            (&self.prepare, &prepare_bg, render_size),
++            (&self.reactivity, &reactivity_bg, render_size),
++            (&self.accumulate, &accumulate_bg, out_size),
++        ] {
++            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fsr3"), timestamp_writes: None });
++            pass.set_pipeline(pipeline);
++            pass.set_bind_group(0, &globals, &[]);
++            pass.set_bind_group(1, bg, &[]);
++            pass.dispatch_workgroups(groups(size[0]), groups(size[1]), 1);
++        }
++        queue.submit([encoder.finish()]);
++        self.last = Some(frame);
++        self.frame_index = self.frame_index.wrapping_add(1).max(1);
++        &self.targets.as_ref().expect("targets").out.view
++    }
++}
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/generar.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/generar.rs
+--- a/crates/rustudio-render/src/generar.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/crates/rustudio-render/src/generar.rs	2026-11-22 12:32:54.910498075 -0600
+@@ -0,0 +1,231 @@
++//! (RustLauncher) Frame generation for the editor view (experimental, off
++//! by default): a frame between two drawn ones, made by reprojecting the
++//! last finished image to the camera's pose now, with the last frame's depth.
++//! The scene is not drawn that turn, so the GPU does about half the work.
++//!
++//! 1. **splat** (render size): the last depth's texels are moved into the new
++//!    view (reverse-Z, atomic max keeps the nearest at each pixel);
++//! 2. **warp** (output size): each pixel takes that depth (holes: the
++//!    farthest neighbour in 5×5, what a disocclusion reveals), goes back to
++//!    the last view and reads the last image there.
++//!
++//! Only the camera's motion is known (rustudio draws no per-object
++//! velocity): what moves on its own stays where it was for that frame.
++
++use egui_wgpu::wgpu;
++use glam::Mat4;
++
++const SHADER: &str = r#"
++struct G {
++    vp_now: mat4x4<f32>,
++    inv_vp_now: mat4x4<f32>,
++    vp_last: mat4x4<f32>,
++    inv_vp_last_jit: mat4x4<f32>,
++    render_size: vec2<f32>,
++    out_size: vec2<f32>,
++};
++@group(0) @binding(0) var<uniform> g: G;
++@group(0) @binding(1) var last_depth: texture_depth_2d;
++@group(0) @binding(2) var last_color: texture_2d<f32>;
++@group(0) @binding(3) var<storage, read_write> splat: array<atomic<u32>>;
++@group(0) @binding(4) var out_img: texture_storage_2d<rgba8unorm, write>;
++@group(0) @binding(5) var samp: sampler;
++
++fn rs() -> vec2<i32> { return vec2<i32>(g.render_size); }
++
++@compute @workgroup_size(8, 8)
++fn splat_pass(@builtin(global_invocation_id) id: vec3<u32>) {
++    let px = vec2<i32>(id.xy);
++    let size = rs();
++    if (any(px >= size)) { return; }
++    let d = textureLoad(last_depth, px, 0);
++    if (d <= 1e-7) { return; }
++    let uv = (vec2<f32>(px) + 0.5) / g.render_size;
++    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
++    let h = g.inv_vp_last_jit * vec4<f32>(ndc, d, 1.0);
++    let world = h.xyz / h.w;
++    let c = g.vp_now * vec4<f32>(world, 1.0);
++    if (c.w <= 1e-6) { return; }
++    let n = c.xy / c.w;
++    let q = vec2<i32>(floor(vec2<f32>(n.x * 0.5 + 0.5, 0.5 - n.y * 0.5) * g.render_size));
++    if (any(q < vec2<i32>(0)) || any(q >= size)) { return; }
++    atomicMax(&splat[q.y * size.x + q.x], bitcast<u32>(c.z / c.w));
++}
++
++fn splat_at(q: vec2<i32>) -> f32 {
++    let size = rs();
++    let c = clamp(q, vec2<i32>(0), size - vec2<i32>(1));
++    return bitcast<f32>(atomicLoad(&splat[c.y * size.x + c.x]));
++}
++
++@compute @workgroup_size(8, 8)
++fn warp_pass(@builtin(global_invocation_id) id: vec3<u32>) {
++    let o = vec2<i32>(id.xy);
++    if (any(o >= vec2<i32>(g.out_size))) { return; }
++    let uv = (vec2<f32>(o) + 0.5) / g.out_size;
++    let rpx = vec2<i32>(uv * g.render_size);
++    var d = splat_at(rpx);
++    if (d <= 1e-7) {
++        // A hole: the farthest (smallest) non-zero depth around.
++        var far = 1e30;
++        for (var y = -2; y <= 2; y++) {
++            for (var x = -2; x <= 2; x++) {
++                let v = splat_at(rpx + vec2<i32>(x, y));
++                if (v > 1e-7) { far = min(far, v); }
++            }
++        }
++        d = select(1e-7, far, far < 1e29);
++    }
++    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
++    let h = g.inv_vp_now * vec4<f32>(ndc, d, 1.0);
++    let world = h.xyz / h.w;
++    let p = g.vp_last * vec4<f32>(world, 1.0);
++    var src = uv;
++    if (p.w > 1e-6) {
++        let n = p.xy / p.w;
++        src = vec2<f32>(n.x * 0.5 + 0.5, 0.5 - n.y * 0.5);
++    }
++    let col = textureSampleLevel(last_color, samp, clamp(src, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0);
++    textureStore(out_img, o, vec4<f32>(col.rgb, 1.0));
++}
++"#;
++
++struct Targets {
++    render_size: [u32; 2],
++    out_size: [u32; 2],
++    splat: wgpu::Buffer,
++    out_tex: wgpu::Texture,
++    pub out: wgpu::TextureView,
++}
++
++pub struct Generar {
++    layout: wgpu::BindGroupLayout,
++    splat: wgpu::ComputePipeline,
++    warp: wgpu::ComputePipeline,
++    params: wgpu::Buffer,
++    sampler: wgpu::Sampler,
++    targets: Option<Targets>,
++    /// Bumped when `out` is recreated, so the caller can re-register it.
++    pub generation: u64,
++}
++
++impl Generar {
++    pub fn new(device: &wgpu::Device) -> Self {
++        use wgpu::{BindGroupLayoutEntry as E, BindingType as T, ShaderStages as S};
++        let entry = |binding, ty| E { binding, visibility: S::COMPUTE, ty, count: None };
++        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
++            label: Some("generar"),
++            entries: &[
++                entry(0, T::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }),
++                entry(1, T::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }),
++                entry(2, T::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }),
++                entry(3, T::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }),
++                entry(4, T::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba8Unorm, view_dimension: wgpu::TextureViewDimension::D2 }),
++                entry(5, T::Sampler(wgpu::SamplerBindingType::Filtering)),
++            ],
++        });
++        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("generar"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
++        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("generar"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
++        let pipeline = |entry: &str| {
++            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
++                label: Some(entry),
++                layout: Some(&pl),
++                module: &module,
++                entry_point: Some(entry),
++                compilation_options: Default::default(),
++                cache: None,
++            })
++        };
++        Self {
++            splat: pipeline("splat_pass"),
++            warp: pipeline("warp_pass"),
++            params: device.create_buffer(&wgpu::BufferDescriptor { label: Some("generar"), size: 288, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
++            sampler: device.create_sampler(&wgpu::SamplerDescriptor { label: Some("generar"), mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }),
++            layout,
++            targets: None,
++            generation: 0,
++        }
++    }
++
++    /// The generated frame: the last finished image `last_color` and its
++    /// depth `last_depth` (both from the last drawn frame, whose matrices
++    /// are `vp_last` (no jitter) and `inv_vp_last_jit`) warped to the view
++    /// `vp_now` / `inv_vp_now`. Returns the result's view, and whether it is
++    /// a new texture (to register again).
++    #[allow(clippy::too_many_arguments)]
++    pub fn run(
++        &mut self,
++        device: &wgpu::Device,
++        queue: &wgpu::Queue,
++        last_color: &wgpu::TextureView,
++        last_depth: &wgpu::TextureView,
++        render_size: [u32; 2],
++        out_size: [u32; 2],
++        vp_now: Mat4,
++        inv_vp_now: Mat4,
++        vp_last: Mat4,
++        inv_vp_last_jit: Mat4,
++    ) -> (&wgpu::TextureView, bool) {
++        let recreated = self.targets.as_ref().is_none_or(|t| t.render_size != render_size || t.out_size != out_size);
++        if self.targets.as_ref().is_none_or(|t| t.render_size != render_size || t.out_size != out_size) {
++            let out_tex = device.create_texture(&wgpu::TextureDescriptor {
++                label: Some("generar out"),
++                size: wgpu::Extent3d { width: out_size[0].max(1), height: out_size[1].max(1), depth_or_array_layers: 1 },
++                mip_level_count: 1,
++                sample_count: 1,
++                dimension: wgpu::TextureDimension::D2,
++                format: wgpu::TextureFormat::Rgba8Unorm,
++                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
++                view_formats: &[],
++            });
++            let out = out_tex.create_view(&Default::default());
++            self.targets = Some(Targets {
++                render_size,
++                out_size,
++                splat: device.create_buffer(&wgpu::BufferDescriptor {
++                    label: Some("generar splat"),
++                    size: render_size[0].max(1) as u64 * render_size[1].max(1) as u64 * 4,
++                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
++                    mapped_at_creation: false,
++                }),
++                out_tex,
++                out,
++            });
++            self.generation += 1;
++        }
++        let t = self.targets.as_ref().expect("targets");
++        let mut p = [0f32; 72];
++        p[0..16].copy_from_slice(&vp_now.to_cols_array());
++        p[16..32].copy_from_slice(&inv_vp_now.to_cols_array());
++        p[32..48].copy_from_slice(&vp_last.to_cols_array());
++        p[48..64].copy_from_slice(&inv_vp_last_jit.to_cols_array());
++        p[64] = render_size[0] as f32;
++        p[65] = render_size[1] as f32;
++        p[66] = out_size[0] as f32;
++        p[67] = out_size[1] as f32;
++        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&p));
++        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("generar"),
++            layout: &self.layout,
++            entries: &[
++                wgpu::BindGroupEntry { binding: 0, resource: self.params.as_entire_binding() },
++                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(last_depth) },
++                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(last_color) },
++                wgpu::BindGroupEntry { binding: 3, resource: t.splat.as_entire_binding() },
++                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&t.out) },
++                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
++            ],
++        });
++        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("generar") });
++        encoder.clear_buffer(&t.splat, 0, None);
++        let groups = |n: u32| n.div_ceil(8);
++        for (pipeline, size) in [(&self.splat, render_size), (&self.warp, out_size)] {
++            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("generar"), timestamp_writes: None });
++            pass.set_pipeline(pipeline);
++            pass.set_bind_group(0, &bg, &[]);
++            pass.dispatch_workgroups(groups(size[0]), groups(size[1]), 1);
++        }
++        queue.submit([encoder.finish()]);
++        (&self.targets.as_ref().expect("targets").out, recreated)
++    }
++}
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/lib.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/lib.rs
+--- a/crates/rustudio-render/src/lib.rs	2026-11-22 12:53:46.955771410 -0600
++++ b/crates/rustudio-render/src/lib.rs	2026-11-22 12:27:03.497018859 -0600
+@@ -25,6 +25,11 @@
+ pub mod wrap;
+ pub mod hsr;
+ pub mod lightgrid;
++pub mod finish;
++pub mod escalado;
++pub mod fsr2;
++pub mod fsr3;
++pub mod generar;
+ pub mod lightocc;
+ pub mod matpack;
+ pub mod grass_temporal;
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/quality.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/quality.rs
+--- a/crates/rustudio-render/src/quality.rs	2026-11-22 12:53:46.955771410 -0600
++++ b/crates/rustudio-render/src/quality.rs	2026-11-21 20:34:39.247510716 -0600
+@@ -18,6 +18,31 @@
+     0, 0, 0, 0, 0, 0, 1, 2, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17,
+ ];
+ 
++/// (RustLauncher) The frame time Automatic aims for at every level, in
++/// place of Studio's table (34 ms, ~30 fps, through level 13): 60 fps on a
++/// weak GPU, or `RUSTUDIO_QUALITY_TARGET_FPS`. Studio's own table climbed a
++/// Vega 8 to level 15-16 and swung between 60 and ~30 fps there (Laser Tag,
++/// 90 s: 40 fps mean in Edit, 50 in Play).
++fn target_override_ms() -> Option<f32> {
++    static FPS: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
++    let fps = *FPS.get_or_init(|| {
++        std::env::var("RUSTUDIO_QUALITY_TARGET_FPS").ok()?.parse::<f32>().ok().filter(|f| (10.0..=500.0).contains(f))
++    });
++    fps.or_else(|| rustudio_core::rustudio_settings::weak_gpu().then_some(60.0)).map(|f| 1000.0 / f)
++}
++
++/// The frame time aimed for at level `row + 1`.
++fn target_ms(row: usize) -> f32 {
++    target_override_ms().unwrap_or(TARGET_MS[row])
++}
++
++/// (RustLauncher) On a fixed target the 3D render may use half the frame:
++/// measured in the editor inside RustLauncher (Vega 8 at 400-700 MHz,
++/// Laser Tag), renders up to ~7 ms kept 60 fps and ~9.8 ms missed the
++/// display's refresh every frame (34 ms), the rest of the frame being the
++/// editor's UI, effects, the final passes and the compositor.
++const FIXED_RENDER_SHARE: f32 = 0.5;
++
+ #[derive(Clone, Copy, Debug)]
+ pub struct Profile(u8);
+ 
+@@ -192,7 +217,14 @@
+         self.averages.push(average);
+         let row = usize::from(self.level - 1);
+         let render_average = self.render_times.mean();
+-        let render_bound = render_average > average * 0.625;
++        // (RustLauncher) On a fixed target, against the target: a frame
++        // that missed the refresh doubles, and the render's share of it
++        // halves, so `average × 0.625` never said render-bound there.
++        let fixed = target_override_ms();
++        let render_bound = match fixed {
++            Some(t) => render_average > t * FIXED_RENDER_SHARE,
++            None => render_average > average * 0.625,
++        };
+         if self.level > 1 && average > 60.0 && render_bound {
+             self.over_budget = self.over_budget.saturating_add(1);
+             if self.over_budget == 5 {
+@@ -210,13 +242,16 @@
+         }
+         if self.down_delay == 0
+             && self.level > 1
+-            && average > TARGET_MS[row] + 2.0
++            && average > target_ms(row) + 2.0
+             && render_bound
+         {
+             self.step(false, false);
+         } else if self.up_delay == 0
+             && self.level < MAX_LEVEL
+-            && render_average < (TARGET_MS[row + 1] * 0.8 - self.step_hill[row + 1]).max(17.5)
++            && match fixed {
++                Some(t) => render_average < t * FIXED_RENDER_SHARE - self.step_hill[row + 1],
++                None => render_average < (TARGET_MS[row + 1] * 0.8 - self.step_hill[row + 1]).max(17.5),
++            }
+         {
+             self.step(true, false);
+         }
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/render.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/render.rs
+--- a/crates/rustudio-render/src/render.rs	2026-11-22 12:53:46.957771409 -0600
++++ b/crates/rustudio-render/src/render.rs	2026-11-22 12:42:37.126793142 -0600
+@@ -1517,6 +1517,16 @@
+     }
+ }
+ 
++/// What the last drawn frame was made with (frame generation).
++#[derive(Clone, Copy)]
++struct RealFrame {
++    vp: glam::Mat4,
++    inv_vp_jittered: glam::Mat4,
++    cam_pos: glam::Vec3,
++    out_size: [u32; 2],
++    render_size: [u32; 2],
++}
++
+ struct Target {
+     samples: u32,
+     size: [u32; 2],
+@@ -2162,6 +2172,27 @@
+     /// alone (bindings 0, 2, 3), so the clouds' 8 textures fit in 16.
+     sky_globals: Option<(wgpu::BindGroupLayout, wgpu::BindGroup)>,
+     lights_buf: wgpu::Buffer,
++    /// (RustLauncher) FXAA / FSR over the finished image (finish.rs).
++    finish: Option<crate::finish::Finish>,
++    /// (RustLauncher) FSR 2 temporal upscaling (fsr2.rs), and this frame's
++    /// jitter and matrices when the view draws for it.
++    fsr2: Option<crate::fsr2::Fsr2>,
++    fsr3: Option<crate::fsr3::Fsr3>,
++    jitter_index: u32,
++    /// (RustLauncher) Frame generation (generar.rs): its warp, the last
++    /// drawn frame's matrices, and whether this turn / the view shows one.
++    generar: Option<crate::generar::Generar>,
++    last_real: Option<RealFrame>,
++    generated_now: bool,
++    showing_generated: bool,
++    temporal: Option<crate::fsr2::Frame>,
++    /// This frame wanted multisampling but draws one sample (weak GPU): FXAA.
++    finish_fxaa: bool,
++    /// Bumped when the display texture is recreated.
++    display_generation: u64,
++    /// What the egui texture shows: 0 the display image, else the
++    /// finish generation.
++    shown_generation: u64,
+     /// The depth map the sun's cascades are drawn into, one at a time.
+     shadow_view: wgpu::TextureView,
+     /// The sun's shadow cascades: the atlas the shaders read (sun_shadow.rs).
+@@ -2944,6 +2975,18 @@
+             sky_globals,
+             globals_layout: bgl,
+             lights_buf,
++            finish: None,
++            fsr2: None,
++            fsr3: None,
++            jitter_index: 0,
++            generar: None,
++            last_real: None,
++            generated_now: false,
++            showing_generated: false,
++            temporal: None,
++            finish_fxaa: false,
++            display_generation: 0,
++            shown_generation: 0,
+             shadow_view,
+             sun,
+             clouds: [None, None, None],
+@@ -4105,6 +4148,8 @@
+                 | wgpu::TextureUsages::COPY_SRC,
+         );
+         let display_view = display.create_view(&Default::default());
++        self.display_generation += 1;
++        self.shown_generation = 0;
+         let mut egui_renderer = rs.renderer.write();
+         match self.texture_id {
+             Some(id) => egui_renderer.update_egui_texture_from_wgpu_texture(
+@@ -4168,6 +4213,9 @@
+         fx: Option<&crate::world_gui::FxFrame>,
+         tone_curve: Option<[f32; 5]>,
+     ) {
++        if self.generated_now {
++            return;
++        }
+         let Some(t) = self.target.as_ref() else { return };
+         let pass = self.world_gui[sample_slot(t.samples)]
+             .get_or_insert_with(|| crate::world_gui::WorldGuiPass::new(&rs.device, &rs.queue, DISPLAY_FORMAT, t.samples));
+@@ -4185,10 +4233,122 @@
+         }
+     }
+ 
++    /// (RustLauncher) This frame's FSR 2 jitter (render pixels) for a view
++    /// drawn at `render_size` and shown at `out_size`.
++    pub fn temporal_jitter(&mut self, _rs: &egui_wgpu::RenderState, render_size: [u32; 2], out_size: [u32; 2]) -> [f32; 2] {
++        let n = crate::fsr2::phase_count(render_size[0], out_size[0]);
++        self.jitter_index = self.jitter_index.wrapping_add(1);
++        let i = self.jitter_index % n + 1;
++        [crate::fsr2::halton(i, 2) - 0.5, crate::fsr2::halton(i, 3) - 0.5]
++    }
++
++    /// (RustLauncher) The frame about to be drawn is for FSR 2 (`Some`:
++    /// its jitter and matrices) or not (`None`).
++    pub fn set_temporal(&mut self, frame: Option<crate::fsr2::Frame>) {
++        if frame.is_none() {
++            if let Some(f) = self.fsr2.as_mut() {
++                f.reset();
++            }
++            if let Some(f) = self.fsr3.as_mut() {
++                f.reset();
++            }
++        }
++        self.temporal = frame;
++    }
++
++    /// (RustLauncher) Frame generation: when the last turn drew a real frame
++    /// (and the camera has not jumped), makes this turn's frame from it
++    /// instead of drawing the scene, and points the view's texture at it.
++    /// `vp` / `inv_vp` are the camera's now, without jitter. `None`: draw.
++    pub fn try_generate(
++        &mut self,
++        rs: &egui_wgpu::RenderState,
++        out_size: [u32; 2],
++        vp: glam::Mat4,
++        inv_vp: glam::Mat4,
++        cam_pos: glam::Vec3,
++    ) -> Option<egui::TextureId> {
++        let out_size = [out_size[0].clamp(1, 8192), out_size[1].clamp(1, 8192)];
++        let real = self.last_real?;
++        let id = self.texture_id?;
++        let t = self.target.as_ref()?;
++        // Only the turn after a drawn frame, at the same sizes, with the
++        // camera close to where it was.
++        let ok = crate::escalado::generar()
++            && self.temporal.is_some()
++            && !self.showing_generated
++            && real.out_size == out_size
++            && real.render_size == t.size
++            && t.samples == 1
++            && real.cam_pos.distance(cam_pos) < 20.0;
++        if !ok {
++            return None;
++        }
++        let last_color = self.finish.as_ref()?.last_sharpened()?;
++        let gen_ = self.generar.get_or_insert_with(|| crate::generar::Generar::new(&rs.device));
++        let (view, changed) = gen_.run(&rs.device, &rs.queue, last_color, &t.depth, t.size, out_size, vp, inv_vp, real.vp, real.inv_vp_jittered);
++        if changed || !self.showing_generated {
++            rs.renderer.write().update_egui_texture_from_wgpu_texture(&rs.device, view, wgpu::FilterMode::Linear, id);
++        }
++        self.generated_now = true;
++        self.showing_generated = true;
++        Some(id)
++    }
++
++    /// (RustLauncher) The view's last passes (finish.rs): FXAA when this
++    /// frame drew one sample in place of several, and FSR 1 when the image
++    /// is smaller than `out_size` (the view's physical pixels). Points the
++    /// view's egui texture at the result. Call after everything else drew
++    /// into the image (world GUIs, effects, highlights).
++    pub fn finish_view(&mut self, rs: &egui_wgpu::RenderState, out_size: [u32; 2]) {
++        let _b = rustudio_core::bench::scope("finish_view");
++        if self.generated_now {
++            // The generated frame is already final (world GUIs and highlights
++            // came with the image it was made from).
++            self.generated_now = false;
++            return;
++        }
++        let (Some(t), Some(id)) = (self.target.as_ref(), self.texture_id) else { return };
++        let out_size = [out_size[0].clamp(1, 8192), out_size[1].clamp(1, 8192)];
++        let finish = self.finish.get_or_insert_with(|| crate::finish::Finish::new(&rs.device));
++        let (view, generation) = match self.temporal.filter(|_| t.samples == 1) {
++            // FSR 2 or 3.1: the temporal upscale, then RCAS.
++            Some(frame) => {
++                let up = if crate::escalado::modo() == crate::escalado::Modo::Fsr2 {
++                    let f = self.fsr2.get_or_insert_with(|| crate::fsr2::Fsr2::new(&rs.device));
++                    f.run(&rs.device, &rs.queue, &t.display_view, &t.depth, t.size, out_size, frame)
++                } else {
++                    let f = self.fsr3.get_or_insert_with(|| crate::fsr3::Fsr3::new(&rs.device));
++                    f.run(&rs.device, &rs.queue, &t.display_view, &t.depth, t.size, out_size, frame)
++                };
++                finish.sharpen(&rs.device, &rs.queue, up, out_size)
++            }
++            None => match finish.apply(&rs.device, &rs.queue, &t.display_view, self.display_generation, t.size, out_size, self.finish_fxaa) {
++                Some((view, generation)) => (view, generation),
++                None => (&t.display_view, 0),
++            },
++        };
++        if self.showing_generated {
++            self.showing_generated = false;
++            self.shown_generation = u64::MAX;
++        }
++        if generation != self.shown_generation {
++            rs.renderer.write().update_egui_texture_from_wgpu_texture(&rs.device, view, wgpu::FilterMode::Linear, id);
++            self.shown_generation = generation;
++        }
++        self.last_real = self.temporal.filter(|_| t.samples == 1).map(|f| RealFrame {
++            vp: f.view_proj,
++            inv_vp_jittered: f.inv_view_proj_jittered,
++            cam_pos: f.cam_pos,
++            out_size,
++            render_size: t.size,
++        });
++    }
++
+     /// Highlights over the finished image (highlight.rs): each one's parts
+     /// as drawn this frame (their deformed / clothed meshes included).
+     pub fn draw_highlights(&mut self, rs: &egui_wgpu::RenderState, list: &[crate::highlight::HighlightDraw]) {
+-        if list.is_empty() {
++        if list.is_empty() || self.generated_now {
+             return;
+         }
+         let Some(t) = self.target.as_ref() else { return };
+@@ -4324,6 +4484,7 @@
+         frame: &Frame,
+     ) -> Option<egui::TextureId> {
+         let svc_t0 = Instant::now();
++        self.generated_now = false;
+         let size = [size[0].clamp(1, 8192), size[1].clamp(1, 8192)];
+         crate::gpu_timing::set_automatic(frame.quality.is_some());
+         if rustudio_core::profiler::active() {
+@@ -4336,6 +4497,19 @@
+         let low_detail = rustudio_core::rustudio_settings::performance_value("detail") == "low";
+         let manual = if low_detail { 1 } else { SAMPLES };
+         let mut samples = frame.quality.map_or(manual, |profile| profile.samples());
++        // (RustLauncher) A weak GPU draws one sample and smooths the edges
++        // with FXAA afterwards (finish.rs): 4x MSAA cost a quarter of a
++        // Vega 8's frame at quality level 18.
++        self.finish_fxaa = samples > 1 && rustudio_core::rustudio_settings::weak_gpu();
++        if self.finish_fxaa {
++            samples = 1;
++        }
++        // (RustLauncher) FSR 2 resolves its own edges over frames (fsr2.rs):
++        // one sample, no FXAA.
++        if self.temporal.is_some() {
++            self.finish_fxaa = false;
++            samples = 1;
++        }
+         if samples == 2 && !supports_two_samples(rs) {
+             samples = 1;
+         }
+diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/shader.wgsl /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/shader.wgsl
+--- a/crates/rustudio-render/src/shader.wgsl	2026-11-22 12:53:46.958771409 -0600
++++ b/crates/rustudio-render/src/shader.wgsl	2026-11-21 19:35:04.606683106 -0600
+@@ -820,7 +820,9 @@
+         }
+         sum += c;
+     }
+-    return sum;
++    // (RustLauncher) The lights baked into the grid on a weak GPU (game_view
++    // PIXEL_LIGHTS); the grid holds no local light otherwise at this detail.
++    return sum + local_grid_light(world, n);
+ }
+ 
+ // DefaultUnifiedTiledFS.8 clustered local-light BRDF: each light has the
+@@ -854,6 +856,8 @@
+         result.diffuse += (vec3<f32>(kd) - fresnel * ss * kd) * radiance;
+         result.specular += fresnel * distribution * radiance;
+     }
++    // (RustLauncher) The rest, baked into the grid (see local_lights).
++    result.diffuse += kd * local_grid_light(world, n);
+     return result;
+ }
+ 
+diff -ruN '--exclude=target' '--exclude=.git' repo/src/launcher.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/launcher.rs
+--- a/src/launcher.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/src/launcher.rs	2026-11-22 12:20:00.320649393 -0600
+@@ -0,0 +1,180 @@
++//! rustudio dentro de RustLauncher (pestaña Crear).
++//!
++//! El launcher crea el editor con [`embedded`] sobre su propia ventana y su
++//! propio dispositivo wgpu, lo dibuja en su `ui` y, después de cada
++//! fotograma, recoge con [`take_request`] lo que se pidió desde el menú
++//! «RustLauncher» del editor (volver al launcher o jugar).
++
++use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
++
++static EMBEDDED: AtomicBool = AtomicBool::new(false);
++static REQUEST: AtomicU8 = AtomicU8::new(0);
++static PLACE: AtomicU64 = AtomicU64::new(0);
++
++/// Lo que el usuario pidió desde el menú del launcher.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Request {
++    /// Volver a las pestañas del launcher.
++    Back,
++    /// Volver al launcher para elegir un juego.
++    Play,
++    /// Jugar en Roblox a la experiencia abierta en el editor (place id).
++    PlayPlace(u64),
++}
++
++/// The editor view's upscaler: 1 = FSR 1, 2 = FSR 2, 3 = FSR 3.1
++/// (RustLauncher Settings > Escalado del editor).
++pub fn set_escalado(modo: u8) {
++    use rustudio_render::escalado::{Modo, set_modo};
++    set_modo(match modo {
++        1 => Modo::Fsr1,
++        2 => Modo::Fsr2,
++        _ => Modo::Fsr3,
++    });
++}
++
++/// Frame generation in the editor view (experimental).
++pub fn set_generar(on: bool) {
++    rustudio_render::escalado::set_generar(on);
++}
++
++pub fn is_embedded() -> bool {
++    EMBEDDED.load(Ordering::Relaxed)
++}
++
++pub(crate) fn request(r: Request) {
++    let (code, place) = match r {
++        Request::Back => (1, 0),
++        Request::Play => (2, 0),
++        Request::PlayPlace(p) => (3, p),
++    };
++    PLACE.store(place, Ordering::Relaxed);
++    REQUEST.store(code, Ordering::Release);
++}
++
++/// La petición pendiente, si la hay (y la borra).
++pub fn take_request() -> Option<Request> {
++    match REQUEST.swap(0, Ordering::Acquire) {
++        1 => Some(Request::Back),
++        2 => Some(Request::Play),
++        3 => Some(Request::PlayPlace(PLACE.load(Ordering::Relaxed))),
++        _ => None,
++    }
++}
++
++/// El editor sobre la ventana del launcher. `api_dump`: ruta del
++/// api-dump.json que el launcher dejó en su carpeta de datos.
++pub fn embedded(
++    ctx: &egui::Context,
++    render_state: Option<egui_wgpu::RenderState>,
++    wayland: Option<bool>,
++    api_dump: Option<std::path::PathBuf>,
++) -> crate::app::RustudioApp {
++    EMBEDDED.store(true, Ordering::Relaxed);
++    // SAFETY (edición 2024): se llama una vez, desde el hilo de la
++    // interfaz, antes de que el editor lea estas variables.
++    unsafe {
++        // Las actualizaciones las hace el launcher: el actualizador de
++        // rustudio reemplazaría el ejecutable del launcher.
++        std::env::set_var("RUSTUDIO_NO_UPDATE_CHECK", "1");
++        if let Some(p) = api_dump {
++            std::env::set_var("RUSTUDIO_API_DUMP", p);
++        }
++    }
++    // Gráficas integradas (AMD Vega/RDNA de los Ryzen U, Intel UHD/Iris):
++    // rustudio las trata como capaces y las pone a calidad máxima, ~12 ms de
++    // GPU por fotograma solo en efectos. En Wayland eso pierde el refresco y
++    // cae a 30 fps, y la GPU, medio parada, no sube de frecuencia. Medido en
++    // un Ryzen 7 5700U (Laser Tag, vista 768x428): 44,8 fps (1 % peor: 18,7)
++    // con calidad máxima, 59,9 fps (1 % peor: 50,8) con el modo de gráfica
++    // débil, que empieza sin efectos caros y sube la calidad sola mientras
++    // los tiempos lo permiten. RUSTUDIO_LOWEND=0 lo desactiva.
++    if std::env::var_os("RUSTUDIO_LOWEND").is_none()
++        && render_state
++            .as_ref()
++            .is_some_and(|rs| rs.adapter.get_info().device_type == egui_wgpu::wgpu::DeviceType::IntegratedGpu)
++    {
++        // SAFETY: como arriba.
++        unsafe { std::env::set_var("RUSTUDIO_LOWEND", "1") };
++    }
++    static INIT: std::sync::Once = std::sync::Once::new();
++    INIT.call_once(|| {
++        rustudio_core::diagnostics::init();
++        rustudio_core::load_trace::init();
++        crate::studio_hooks::install();
++        rustudio_core::studio_content::spawn_background_install_if_missing();
++    });
++    let harness = crate::app::Harness::embedded();
++    // Pruebas de rendimiento: un lugar abierto al entrar (ver Harness::embedded).
++    let open = std::env::var_os("RUSTUDIO_EMBED_OPEN").map(std::path::PathBuf::from);
++    let guardar = crate::layout_store::enabled(&harness);
++    crate::studio_settings::init(guardar);
++    rustudio_core::rustudio_settings::init(guardar);
++    rustudio_core::profiler::load_saved_config();
++    let mut app = crate::app::RustudioApp::new_in(ctx, render_state, wayland, open, harness, false);
++    app.ed.plugins.set_repaint_context(ctx.clone());
++    app
++}
++
++impl crate::app::Harness {
++    /// El editor tal como lo usa una persona. Para medir el rendimiento
++    /// dentro del launcher (mismas medidas que `--bench` y
++    /// `--profile-capture` de rustudio): RUSTUDIO_EMBED_OPEN=lugar.rbxl,
++    /// RUSTUDIO_EMBED_BENCH=salida.json, RUSTUDIO_EMBED_PROFILE=salida.rsprof,
++    /// RUSTUDIO_EMBED_SECONDS=10.
++    pub fn embedded() -> Self {
++        use crate::run_harness::{HarnessInput, RunHarness};
++        let var = |k: &str| std::env::var_os(k).map(std::path::PathBuf::from);
++        let seconds: f32 =
++            std::env::var("RUSTUDIO_EMBED_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
++        let bench = var("RUSTUDIO_EMBED_BENCH").map(|out| rustudio_core::bench::Bench::new(Some(out), "embedded", false, seconds));
++        let profile =
++            var("RUSTUDIO_EMBED_PROFILE").map(|out| rustudio_core::profiler::cli::CliCapture::new(out, seconds, false, false));
++        Self {
++            run: RunHarness {
++                input: HarnessInput { actions: Vec::new(), pointer: None, shift: false },
++                shot_after: None,
++                log_out: None,
++                started: rustudio_core::sim_clock::now(),
++                screenshot: None,
++                screenshot_requested: false,
++                start_play: false,
++                bench,
++                profile,
++                camera: None,
++                shots: Vec::new(),
++                shot_next: 0,
++                shot_lines: Vec::new(),
++                from_play: false,
++                play_started: None,
++                play_game_time: None,
++                frame_ms: Vec::new(),
++                last_frame: None,
++                no_ui: false,
++                no_render: false,
++                end_after: None,
++                fail_on_error: false,
++                result: None,
++                end_value: None,
++                run_frames: Vec::new(),
++                run_last: None,
++                run_playing: false,
++                finished: false,
++                held: 0.0,
++            },
++            selftest: None,
++            ui_shots: None,
++            open_roblox: None,
++            team_create: None,
++            roblox_picker: None,
++            roblox_settings: false,
++            ui_due: Vec::new(),
++            overlays: false,
++            plugin_files: Vec::new(),
++            installed_plugins: Vec::new(),
++            plugin_dirs: Vec::new(),
++            no_plugins: false,
++            plugins_started: false,
++        }
++    }
++}
+diff -ruN '--exclude=target' '--exclude=.git' repo/src/lib.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/lib.rs
+--- a/src/lib.rs	2026-11-22 12:53:46.961771408 -0600
++++ b/src/lib.rs	2026-11-21 11:01:47.251726794 -0600
+@@ -29,6 +29,7 @@
+ pub mod cloud_ui;
+ pub mod join_ui;
+ pub mod app;
++pub mod launcher;
+ mod native_loop;
+ pub use rustudio_player::{account, asset_report, emote_wheel, game, game_view, keys, offscreen, run_harness, player_app, play};
+ pub mod frame_watchdog;
+diff -ruN '--exclude=target' '--exclude=.git' repo/src/start_page.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/start_page.rs
+--- a/src/start_page.rs	2026-11-22 12:53:46.962771407 -0600
++++ b/src/start_page.rs	2026-11-21 11:01:47.251798097 -0600
+@@ -451,6 +451,21 @@
+             crate::icons::logo(ui, 26.0);
+             ui.add_space(4.0);
+             ui.label(RichText::new("rustudio").size(16.0).strong().color(theme::TEXT));
++            // Dentro de RustLauncher: volver a sus pestañas o ir a jugar (la
++            // página de inicio no tiene barra de menús).
++            if crate::launcher::is_embedded() {
++                use crate::launcher::{request, Request};
++                ui.add_space(16.0);
++                let boton = |ui: &mut egui::Ui, t: &str, fill: Color32| {
++                    ui.add(egui::Button::new(RichText::new(t).color(Color32::WHITE).strong()).fill(fill))
++                };
++                if boton(ui, "Back to launcher", theme::PANEL_ALT).clicked() {
++                    request(Request::Back);
++                }
++                if boton(ui, "Play a game", theme::ACCENT).clicked() {
++                    request(Request::Play);
++                }
++            }
+             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                 let label = if self.game.account.signed_in() {
+                     self.game.account.status_short().trim_start_matches("Roblox: ").to_string()
+diff -ruN '--exclude=target' '--exclude=.git' repo/src/studio_actions.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/studio_actions.rs
+--- a/src/studio_actions.rs	2026-11-22 12:53:46.963771407 -0600
++++ b/src/studio_actions.rs	2026-11-21 11:01:47.251850535 -0600
+@@ -45,7 +45,7 @@
+ /// A menu's shortcut column and width, from its longest label and shortcut.
+ fn menu_metrics(ui: &egui::Ui, items: &[M]) -> (f32, f32) {
+     let font = egui::FontId::proportional(13.0);
+-    let width = |t: &str| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), theme::TEXT).size().x);
++    let width = |t: &str| ui.fonts_mut(|f| f.layout_no_wrap(egui::widget_text::translated(t).into_owned(), font.clone(), theme::TEXT).size().x);
+     let (mut label, mut sc) = (0.0f32, 0.0f32);
+     for m in items {
+         match m {
+@@ -542,6 +542,10 @@
+         let ctx = ui.ctx().clone();
+         let mut chosen: Option<String> = None;
+         egui::MenuBar::new().ui(ui, |ui| {
++            // Dentro de RustLauncher: volver a sus pestañas o jugar.
++            if crate::launcher::is_embedded() {
++                self.launcher_menu(ui);
++            }
+             for (title, items) in MENUS {
+                 let r = ui.menu_button(*title, |ui| {
+                     self.menu_items(ui, items, &mut chosen);
+@@ -577,6 +581,29 @@
+         }
+     }
+ 
++    /// El menú «RustLauncher» (solo con el editor dentro del launcher).
++    fn launcher_menu(&mut self, ui: &mut egui::Ui) {
++        use crate::launcher::{request, Request};
++        let place = self.game.doc.cloud.as_ref().map(|o| o.place_id).filter(|p| *p != 0);
++        ui.menu_button(RichText::new("RustLauncher").strong(), |ui| {
++            if ui.button("Back to launcher").clicked() {
++                request(Request::Back);
++                ui.close();
++            }
++            if ui.button("Play a game").clicked() {
++                request(Request::Play);
++                ui.close();
++            }
++            if let Some(p) = place {
++                ui.separator();
++                if ui.button("Play this experience on Roblox").clicked() {
++                    request(Request::PlayPlace(p));
++                    ui.close();
++                }
++            }
++        });
++    }
++
+     fn menu_items(&mut self, ui: &mut egui::Ui, items: &'static [M], chosen: &mut Option<String>) {
+         let (col, w) = menu_metrics(ui, items);
+         ui.set_width(w);
+diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/context.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/context.rs
+--- a/vendor/egui/src/context.rs	2026-11-22 12:53:46.470771594 -0600
++++ b/vendor/egui/src/context.rs	2026-11-21 11:01:47.251850535 -0600
+@@ -773,6 +773,16 @@
+     }
+ }
+ 
++/// (Añadido por RustLauncher) Función que añade a cualquier
++/// [`FontDefinitions`] que se pase a [`Context::set_fonts`] las fuentes que
++/// un programa necesita siempre (el launcher y el editor comparten contexto).
++static FUENTES_FIJAS: std::sync::RwLock<Option<fn(&mut FontDefinitions)>> = std::sync::RwLock::new(None);
++
++/// Fija la función de [`FUENTES_FIJAS`].
++pub fn set_permanent_fonts(anadir: Option<fn(&mut FontDefinitions)>) {
++    *FUENTES_FIJAS.write().unwrap_or_else(|e| e.into_inner()) = anadir;
++}
++
+ impl Context {
+     /// Revision and dirty texel rectangle (exclusive right and bottom)
+     /// of the last emitted font atlas upload. A full upload has no rectangle.
+@@ -2184,8 +2194,13 @@
+     ///
+     /// The new fonts will become active at the start of the next pass.
+     /// This will overwrite the existing fonts.
+-    pub fn set_fonts(&self, font_definitions: FontDefinitions) {
++    pub fn set_fonts(&self, mut font_definitions: FontDefinitions) {
+         profiling::function_scope!();
++        // (RustLauncher) fuentes que deben seguir ahí las ponga quien las ponga.
++        let fijas = *FUENTES_FIJAS.read().unwrap_or_else(|e| e.into_inner());
++        if let Some(anadir) = fijas {
++            anadir(&mut font_definitions);
++        }
+ 
+         let update_fonts = self.read(|ctx| {
+             // NOTE: this comparison is expensive since it checks TTF data for equality
+diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/lib.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/lib.rs
+--- a/vendor/egui/src/lib.rs	2026-11-22 12:53:46.474017401 -0600
++++ b/vendor/egui/src/lib.rs	2026-11-21 11:01:47.252008261 -0600
+@@ -462,7 +462,7 @@
+ pub use self::{
+     atomics::*,
+     containers::{menu::MenuBar, *},
+-    context::{Context, RepaintCause, RequestRepaintInfo, UiSnapshot, UiSnapshotStart},
++    context::{Context, set_permanent_fonts, RepaintCause, RequestRepaintInfo, UiSnapshot, UiSnapshotStart},
+     data::{
+         Key, UserData,
+         input::*,
+diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/painter.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/painter.rs
+--- a/vendor/egui/src/painter.rs	2026-11-22 12:53:46.475007804 -0600
++++ b/vendor/egui/src/painter.rs	2026-11-21 11:01:47.252063304 -0600
+@@ -492,7 +492,7 @@
+         color: crate::Color32,
+         wrap_width: f32,
+     ) -> Arc<Galley> {
+-        self.fonts_mut(|f| f.layout(text, font_id, color, wrap_width))
++        self.fonts_mut(|f| f.layout(crate::widget_text::traducido(text), font_id, color, wrap_width))
+     }
+ 
+     /// Will line break at `\n`.
+@@ -506,7 +506,7 @@
+         font_id: FontId,
+         color: crate::Color32,
+     ) -> Arc<Galley> {
+-        self.fonts_mut(|f| f.layout(text, font_id, color, f32::INFINITY))
++        self.fonts_mut(|f| f.layout(crate::widget_text::traducido(text), font_id, color, f32::INFINITY))
+     }
+ 
+     /// Lay out this text layut job in a galley.
+diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/widget_text.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/widget_text.rs
+--- a/vendor/egui/src/widget_text.rs	2026-11-22 12:53:46.476761275 -0600
++++ b/vendor/egui/src/widget_text.rs	2026-11-21 11:01:47.252108118 -0600
+@@ -67,6 +67,35 @@
+     }
+ }
+ 
++/// Traductor global de textos de interfaz (añadido por RustLauncher para
++/// mostrar rustudio en español). Recibe el texto original y devuelve la
++/// traducción si la hay. `None` (por defecto) deja todo como estaba.
++static TRADUCTOR: std::sync::RwLock<Option<fn(&str) -> Option<&'static str>>> = std::sync::RwLock::new(None);
++
++/// Activa o desactiva el traductor de textos de interfaz.
++pub fn set_text_translator(traductor: Option<fn(&str) -> Option<&'static str>>) {
++    *TRADUCTOR.write().unwrap_or_else(|e| e.into_inner()) = traductor;
++}
++
++/// El texto tal como se va a dibujar (traducido si hay traductor), para
++/// medirlo antes.
++pub fn translated(text: &str) -> std::borrow::Cow<'_, str> {
++    let traductor = *TRADUCTOR.read().unwrap_or_else(|e| e.into_inner());
++    match traductor.and_then(|f| f(text)) {
++        Some(t) => std::borrow::Cow::Borrowed(t),
++        None => std::borrow::Cow::Borrowed(text),
++    }
++}
++
++#[inline]
++pub(crate) fn traducido(text: String) -> String {
++    let traductor = *TRADUCTOR.read().unwrap_or_else(|e| e.into_inner());
++    match traductor.and_then(|f| f(&text)) {
++        Some(t) => t.to_owned(),
++        None => text,
++    }
++}
++
+ impl From<&str> for RichText {
+     #[inline]
+     fn from(text: &str) -> Self {
+@@ -461,7 +490,7 @@
+         };
+ 
+         (
+-            text,
++            traducido(text),
+             crate::text::TextFormat {
+                 font_id,
+                 extra_letter_spacing,
+@@ -718,7 +747,7 @@
+     ) -> Arc<LayoutJob> {
+         match self {
+             Self::Text(text) => Arc::new(LayoutJob::simple_format(
+-                text,
++                traducido(text),
+                 TextFormat {
+                     font_id: FontSelection::Default.resolve(style),
+                     color: crate::Color32::PLACEHOLDER,
+@@ -776,7 +805,7 @@
+                     .fonts_mut(|f| f.row_height(&font_id) + style.spacing.extra_text_line_spacing);
+ 
+                 let mut layout_job = LayoutJob::simple_format(
+-                    text,
++                    traducido(text),
+                     TextFormat {
+                         font_id,
+                         color,

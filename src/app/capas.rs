@@ -18,17 +18,17 @@ impl App {
         let (estado, objetivo, error) = match (&l.resultado, l.progreso) {
             (Some(Err(e)), _) => (e.clone(), 0.0, true),
             (Some(Ok(())), _) => (
-                l.hito.map(str::to_string).unwrap_or_else(|| format!("Abriendo {cliente}")),
+                l.hito.map(str::to_string).unwrap_or_else(|| trf("Abriendo {}", &[&cliente])),
                 l.fraccion.max(0.22),
                 false,
             ),
             (None, Progreso::Comprobando) => ("Comprobando la versión de Roblox".into(), 0.04, false),
             (None, Progreso::Descargando { hechos, total }) => (
-                format!("Descargando la nueva versión de Roblox: {hechos} de {total} paquetes"),
+                trf("Descargando la nueva versión de Roblox: {} de {} paquetes", &[&hechos, &total]),
                 0.04 + 0.14 * hechos as f32 / total.max(1) as f32,
                 false,
             ),
-            (None, Progreso::Iniciando) => (format!("Iniciando {cliente}"), 0.2, false),
+            (None, Progreso::Iniciando) => (trf("Iniciando {}", &[&cliente]), 0.2, false),
             (None, Progreso::CerrandoAnterior) => ("Cerrando la partida anterior".into(), 0.1, false),
         };
         p.text(Pos2::new(x0, y - 80.0), Align2::LEFT_BOTTOM, "Abriendo", medio(escala::CUERPO), TEXTO_2);
@@ -48,7 +48,7 @@ impl App {
             return;
         }
         let barra = Rect::from_min_size(Pos2::new(x0, y + h + 28.0), Vec2::new(ancho.min(420.0), 4.0));
-        let f = ui.ctx().animate_value_with_time(Id::unique("barra_carga"), objetivo, 0.45);
+        let f = ui.ctx().animate_value_with_time(Id::new("barra_carga"), objetivo, 0.45);
         p.rect_filled(barra, 2, cristal());
         p.rect_filled(Rect::from_min_size(barra.min, Vec2::new(barra.width() * f, 4.0)), 2, FOCO);
         p.text(
@@ -68,7 +68,7 @@ impl App {
         let mut otro = false;
         let mut copiar: Option<String> = None;
         let fondo = self.tinte_actual();
-        egui::Area::new(Id::unique("capa_login")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
+        egui::Area::new(Id::new("capa_login")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
             ui.allocate_rect(pantalla, Sense::click());
             let p = ui.painter().clone();
             p.rect_filled(pantalla, 0, fondo);
@@ -103,9 +103,9 @@ impl App {
                 Login::Esperando { estado, .. } => match estado {
                     EstadoCodigo::Creado => ("Esperando a que escribas el código…".to_string(), TEXTO_2, false),
                     EstadoCodigo::Vinculado(n) => (
-                        format!(
+                        trf(
                             "Código recibido de {}. Confírmalo en ese dispositivo.",
-                            n.clone().unwrap_or_else(|| "tu cuenta".into())
+                            &[&n.clone().unwrap_or_else(|| tr("tu cuenta").into())],
                         ),
                         TEXTO,
                         false,
@@ -200,7 +200,7 @@ impl App {
             }
         }
         let fondo = mezclar(self.tinte_actual(), Color32::WHITE, 0.07);
-        egui::Area::new(Id::unique("dialogo")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
+        egui::Area::new(Id::new("dialogo")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
             ui.allocate_rect(pantalla, Sense::click());
             let p = ui.painter().clone();
             p.rect_filled(pantalla, 0, Color32::from_black_alpha(170));
@@ -265,7 +265,7 @@ impl App {
         ctx.request_repaint();
         let alfa = (t / 0.3).min(1.0).min(((DURACION - t) / 0.45).clamp(0.0, 1.0));
         let fondo = self.tinte_actual();
-        egui::Area::new(Id::unique("animacion")).order(Order::Tooltip).fixed_pos(pantalla.min).show(ctx, |ui| {
+        egui::Area::new(Id::new("animacion")).order(Order::Tooltip).fixed_pos(pantalla.min).show(ctx, |ui| {
             ui.allocate_rect(pantalla, Sense::click());
             let p = ui.painter().clone();
             p.rect_filled(pantalla, 0, fondo.gamma_multiply(alfa));

@@ -43,7 +43,7 @@ impl App {
         for (etiqueta, valor) in [("R15", true), ("R6", false)] {
             let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(64.0, 40.0));
             let activo = listo && r15 == valor;
-            let resp = ui.interact(r, Id::unique(("cuerpo", etiqueta)), Sense::click());
+            let resp = ui.interact(r, Id::new(("cuerpo", etiqueta)), Sense::click());
             let fondo = if activo { FOCO } else if resp.hovered() { cristal_fuerte() } else { cristal() };
             p.rect_filled(r, RADIO, fondo);
             p.text(r.center(), Align2::CENTER_CENTER, etiqueta, semi(16.0), if activo { TINTA } else { TEXTO });
@@ -54,7 +54,7 @@ impl App {
         }
         let g = p.layout_no_wrap("Editor completo en Roblox".into(), medio(escala::ETIQUETA), TEXTO_2);
         let rr = Rect::from_min_size(Pos2::new(x + 8.0, y + 20.0 - g.size().y / 2.0), g.size());
-        let resp = ui.interact(rr.expand(6.0), Id::unique("editor_web"), Sense::click());
+        let resp = ui.interact(rr.expand(6.0), Id::new("editor_web"), Sense::click());
         p.galley(rr.min, g, if resp.hovered() { TEXTO } else { TEXTO_2 });
         if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
             ui.ctx().open_url(egui::OpenUrl::new_tab("https://www.roblox.com/my/avatar"));
@@ -70,7 +70,7 @@ impl App {
             let g = p.layout_no_wrap(cat.nombre().to_string(), semi(17.0), TEXTO);
             let tam = g.size();
             let r = Rect::from_min_size(Pos2::new(xt, yt), tam).expand2(Vec2::new(6.0, 8.0));
-            let resp = ui.interact(r, Id::unique(("cat", cat.nombre())), Sense::click());
+            let resp = ui.interact(r, Id::new(("cat", cat.nombre())), Sense::click());
             p.galley(Pos2::new(xt, yt), g, if activa || resp.hovered() { TEXTO } else { TEXTO_2 });
             if activa {
                 p.rect_filled(Rect::from_min_size(Pos2::new(xt, yt + tam.y + 6.0), Vec2::new(tam.x, 3.0)), 1, FOCO);
@@ -141,7 +141,7 @@ impl App {
                     Elem::Traje(t) => (self.imgs.get((TipoImg::Traje, t.id)), t.nombre.clone(), false),
                     Elem::Obj(o) => (self.imgs.get((TipoImg::Prenda, o.id)), o.nombre.clone(), puestos.contains(&o.id)),
                 };
-                let resp = ui.interact(r, Id::unique(("armario_i", i)), Sense::click());
+                let resp = ui.interact(r, Id::new(("armario_i", i)), Sense::click());
                 let fondo = if resp.hovered() { cristal_fuerte() } else { cristal() };
                 ui.painter().rect_filled(r, RADIO, fondo);
                 if let Some(t) = &tex {

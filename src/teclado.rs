@@ -134,7 +134,7 @@ impl Teclado {
             }
         }
 
-        egui::Area::new(Id::unique("teclado")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
+        egui::Area::new(Id::new("teclado")).order(Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
             ui.allocate_rect(pantalla, Sense::click());
             let p = ui.painter().clone();
             p.rect_filled(pantalla, 0, Color32::from_black_alpha(150));
@@ -172,7 +172,7 @@ impl Teclado {
                 let ancho_tecla = if fila < FILAS.len() { lado } else { (ancho_teclas - 3.0 * hueco) / 4.0 };
                 for col in 0..n {
                     let r = Rect::from_min_size(Pos2::new(x0 + col as f32 * (ancho_tecla + hueco), y), Vec2::new(ancho_tecla, lado));
-                    let resp = ui.interact(r, Id::unique(("tecla", fila, col)), Sense::click());
+                    let resp = ui.interact(r, Id::new(("tecla", fila, col)), Sense::click());
                     if resp.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
                         self.fila = fila;
                         self.col = col;

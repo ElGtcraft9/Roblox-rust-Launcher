@@ -35,7 +35,7 @@ impl App {
         let tam_letra = if r.height() > 54.0 { 22.0 } else { 17.0 };
         if self.cfg.modo == Modo::Consola {
             let texto = self.texto_de(d).clone();
-            let resp = ui.interact(r, Id::unique(("campo", format!("{d:?}"))), Sense::click());
+            let resp = ui.interact(r, Id::new(("campo", format!("{d:?}"))), Sense::click());
             let (t, color) = if texto.is_empty() { (pista_txt.to_string(), TEXTO_2) } else { (texto, TEXTO) };
             let g = galley(ui, &t, medio(tam_letra), color, r.width() - 40.0, 1);
             ui.painter().galley(Pos2::new(r.left() + 20.0, r.center().y - g.size().y / 2.0), g, color);
@@ -58,7 +58,7 @@ impl App {
                 .text_color(TEXTO)
                 .frame(Frame::NONE)
                 .margin(Margin::ZERO)
-                .align(Align2::LEFT_CENTER),
+                .vertical_align(egui::Align::Center),
         );
         if pedir {
             resp.request_focus();

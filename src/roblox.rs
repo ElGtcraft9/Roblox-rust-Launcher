@@ -322,6 +322,29 @@ pub fn limpiar_versiones(raiz: &Path, actual: &str) {
 }
 
 /// Indica si el argumento es una URI de Roblox.
+/// Fija los «FPS máximos» del menú de Roblox (`FramerateCap` en
+/// GlobalBasicSettings_13.xml; -1 = sin límite). Es el limitador del propio
+/// juego: no añade nada al proceso. Si Roblox aún no ha creado el archivo
+/// (primer arranque), no hace nada.
+pub fn fijar_limite_fps(ajustes_roblox: &Path, limite: Option<u16>) -> Result<()> {
+    let Ok(texto) = std::fs::read_to_string(ajustes_roblox) else { return Ok(()) };
+    let Some(nuevo) = con_limite_fps(&texto, limite) else { return Ok(()) };
+    if nuevo != texto {
+        let tmp = ajustes_roblox.with_extension("xml.tmp");
+        std::fs::write(&tmp, nuevo)?;
+        std::fs::rename(tmp, ajustes_roblox)?;
+    }
+    Ok(())
+}
+
+fn con_limite_fps(texto: &str, limite: Option<u16>) -> Option<String> {
+    const ETIQUETA: &str = "<int name=\"FramerateCap\">";
+    let ini = texto.find(ETIQUETA)? + ETIQUETA.len();
+    let fin = ini + texto[ini..].find("</int>")?;
+    let valor = limite.map_or(-1, i32::from);
+    Some(format!("{}{valor}{}", &texto[..ini], &texto[fin..]))
+}
+
 pub fn es_uri_roblox(arg: &str) -> bool {
     let a = arg.to_ascii_lowercase();
     a.starts_with("roblox-player:") || a.starts_with("roblox:")
@@ -329,6 +352,16 @@ pub fn es_uri_roblox(arg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cambia_el_limite_de_fps() {
+        let xml = "<Item>\n\t\t\t<int name=\"FramerateCap\">-1</int>\n\t\t\t<int name=\"GraphicsQualityLevel\">21</int>\n";
+        let con = con_limite_fps(xml, Some(60)).unwrap();
+        assert!(con.contains("\"FramerateCap\">60</int>") && con.contains("\"GraphicsQualityLevel\">21<"));
+        assert_eq!(con_limite_fps(&con, None).unwrap(), xml);
+        assert!(con_limite_fps("<Item></Item>", Some(60)).is_none());
+    }
+
     use super::*;
     use std::time::Instant;
 

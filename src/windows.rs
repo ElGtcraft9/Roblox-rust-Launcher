@@ -18,6 +18,20 @@ pub const APIS_GRAFICAS: bool = true;
 pub const ACTUALIZA_CLIENTE: bool = true;
 /// En Windows, la primera vez se registra para abrir los juegos de roblox.com.
 pub const ENLACES_POR_DEFECTO: bool = true;
+/// Los efectos de Sober (gamescope, vkBasalt, MangoHud, MAKO) son de Linux.
+pub const EFECTOS_SOBER: bool = false;
+
+pub fn vkbasalt_instalado() -> bool {
+    false
+}
+
+pub fn mako_instalado() -> bool {
+    false
+}
+
+pub async fn instalar_mako(_http: &reqwest::Client, _progreso: impl Fn(f32)) -> Result<()> {
+    anyhow::bail!("MAKO solo existe en Linux")
+}
 
 fn exe_instalado() -> PathBuf {
     base().join("RustLauncher.exe")
@@ -135,6 +149,9 @@ pub async fn lanzar(uri: &str, ajustes: &AjustesCliente, progreso: ProgresoFn) -
     let ajustes_dir = dir.join("ClientSettings");
     std::fs::create_dir_all(&ajustes_dir)?;
     std::fs::write(ajustes_dir.join("ClientAppSettings.json"), flags::json_windows(ajustes))?;
+    if let Some(local) = dirs::data_local_dir() {
+        roblox::fijar_limite_fps(&local.join("Roblox").join("GlobalBasicSettings_13.xml"), ajustes.limite_fps)?;
+    }
 
     let mut cmd = Command::new(dir.join("RobloxPlayerBeta.exe"));
     cmd.current_dir(&dir);

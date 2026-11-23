@@ -1,6 +1,6 @@
 [package]
 name = "rust-launcher"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 description = "Launcher alternativo para Roblox con interfaz de consola"
@@ -10,19 +10,25 @@ repository = "https://github.com/ElGtcraft9/Roblox-rust-Launcher"
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "7.0.0"
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "wayland", "x11", "clipboard"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11", "links"] }
 futures-util = "0.3.34"
 gilrs = "0.11.2"
 image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
 keyring = "4.2.0"
 md-5 = "0.11.0"
 minisign-verify = "0.3.0"
+# El editor de la pestaña Crear (rustudio, compilado dentro del launcher).
+rustudio = { path = "rustudio" }
 reqwest = { version = "0.13.5", default-features = false, features = ["stream", "json", "http2", "rustls", "gzip", "brotli", "zstd"] }
 self-replace = "1.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sys-locale = "0.3.2"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
 zip = { version = "9.8.0", default-features = false, features = ["deflate"] }
+flate2 = "1.1.11"
+mimalloc = "0.1.52"
+sha2 = "0.11.1"
 
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
@@ -32,11 +38,41 @@ libc = "0.2.191"
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+# «thin»: con rustudio dentro, la LTO completa tarda demasiado en enlazar.
+lto = "thin"
+codegen-units = 16
 strip = true
-panic = "abort"
+# Sin panic = "abort": rustudio recupera los fallos de sus complementos y
+# scripts con catch_unwind; con abort, cualquiera cerraría el launcher.
+
+# Igual que release, con nombres de funciones para perfilar
+# (cargo build --profile perfil; binario en target/perfil/).
+[profile.perfil]
+inherits = "release"
+strip = false
+debug = "line-tables-only"
+
+# Las copias de rustudio con sus cambios (ver rustudio/Cargo.toml); egui
+# además lleva el traductor de textos del launcher (widget_text.rs).
+[patch.crates-io]
+rustls = { path = "rustudio/vendor/rustls" }
+luau0-src = { path = "rustudio/vendor/luau0-src" }
+mlua-sys = { path = "rustudio/vendor/mlua-sys" }
+parry3d = { path = "rustudio/vendor/parry3d" }
+mlua = { path = "rustudio/vendor/mlua" }
+egui = { path = "rustudio/vendor/egui" }
+egui-wgpu = { path = "rustudio/vendor/egui-wgpu" }
+epaint = { path = "rustudio/vendor/epaint" }
+egui_dock = { path = "rustudio/vendor/egui_dock" }
+rbx_dom_weak = { path = "rustudio/vendor/rbx_dom_weak" }
+rapier3d = { path = "rustudio/vendor/rapier3d" }
+
+[build-dependencies]
+flate2 = "1.1.11"
 
 # Dependencias optimizadas también en depuración (decodificar PNG sin optimizar es muy lento).
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 2

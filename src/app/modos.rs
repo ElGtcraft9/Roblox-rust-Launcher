@@ -105,6 +105,29 @@ impl App {
         });
     }
 
+    /// Descarga e instala MAKO en segundo plano.
+    pub(super) fn instalar_mako(&mut self) {
+        if matches!(self.mako, EstadoMako::Descargando(_)) {
+            return;
+        }
+        self.mako = EstadoMako::Descargando(0);
+        let (http, tx) = (self.http.clone(), self.tx.clone());
+        self.rt.spawn(async move {
+            let ultimo = std::sync::atomic::AtomicU8::new(0);
+            let r = crate::plataforma::instalar_mako(&http, |f| {
+                let pct = (f * 100.0) as u8;
+                if ultimo.swap(pct, std::sync::atomic::Ordering::Relaxed) != pct {
+                    tx.enviar(Msg::Mako(EstadoMako::Descargando(pct)));
+                }
+            })
+            .await;
+            tx.enviar(Msg::Mako(match r {
+                Ok(()) => EstadoMako::Nada,
+                Err(e) => EstadoMako::Error(texto_error(e)),
+            }));
+        });
+    }
+
     /// Progreso (0 a 1, con desaceleración) de la transición entre vistas.
     /// Detecta solo los cambios de pestaña y la apertura de «Más información».
     pub(super) fn transicion(&mut self) -> f32 {

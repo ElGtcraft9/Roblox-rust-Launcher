@@ -11,7 +11,7 @@ impl App {
         if estantes.is_empty() {
             let p = ui.painter().clone();
             let (t, d) = match &self.inicio_estado {
-                Carga::Error(e) => ("No se pudo cargar la portada".to_string(), format!("Comprueba tu conexión a internet. {e}")),
+                Carga::Error(e) => ("No se pudo cargar la portada".to_string(), trf("Comprueba tu conexión a internet. {}", &[e])),
                 _ => ("Cargando juegos".to_string(), String::new()),
             };
             p.text(Pos2::new(x0, pantalla.center().y - 20.0), Align2::LEFT_BOTTOM, t, estrecha_fuerte(escala::TITULO), TEXTO);
@@ -111,10 +111,10 @@ impl App {
         let y_meta = y_botones - 20.0;
         let mut meta = Vec::new();
         if let Some(n) = enfocado.jugando {
-            meta.push(format!("{} jugando ahora", abreviar(n)));
+            meta.push(trf("{} jugando ahora", &[&abreviar(n)]));
         }
         if let Some((a, b)) = enfocado.votos.filter(|(a, b)| a + b > 0) {
-            meta.push(format!("{:.0} % de valoraciones positivas", a as f64 * 100.0 / (a + b) as f64));
+            meta.push(trf("{} % de valoraciones positivas", &[&format!("{:.0}", a as f64 * 100.0 / (a + b) as f64)]));
         }
         let p = ui.painter().clone();
         let mut xm = x0;
@@ -147,7 +147,7 @@ impl App {
         favorito |= r_fav.clicked();
 
         // --- Estantes ---
-        let desplaz = ui.ctx().animate_value_with_time(Id::unique("desplaz_v"), self.fila as f32 * alto_fila, 0.18);
+        let desplaz = ui.ctx().animate_value_with_time(Id::new("desplaz_v"), self.fila as f32 * alto_fila, 0.18);
         let base = 150.0;
         let hueco = 16.0;
         let pc_modo = pc;
@@ -173,7 +173,7 @@ impl App {
                 .map(|(ci, j)| {
                     let t = ui
                         .ctx()
-                        .animate_bool_with_time(Id::unique(("ficha", fi, j.universe_id)), activa && ci == col_fila, 0.16);
+                        .animate_bool_with_time(Id::new(("ficha", fi, j.universe_id)), activa && ci == col_fila, 0.16);
                     base * (1.0 + 0.12 * t)
                 })
                 .collect();
@@ -185,7 +185,7 @@ impl App {
             let previo = *self.desplaz.get(titulo).unwrap_or(&0.0);
             let objetivo = previo.clamp((fin_foco - visible).max(0.0), inicio_foco);
             self.desplaz.insert(titulo.clone(), objetivo);
-            let off = ui.ctx().animate_value_with_time(Id::unique(("desplaz_h", titulo)), objetivo, 0.18);
+            let off = ui.ctx().animate_value_with_time(Id::new(("desplaz_h", titulo)), objetivo, 0.18);
             if activa {
                 let total: f32 = anchos.iter().sum::<f32>() + hueco * anchos.len().saturating_sub(1) as f32;
                 fila_activa_geo = Some((y + 40.0, off, total));
@@ -216,7 +216,7 @@ impl App {
                         let g = galley(ui, &j.nombre, semi(18.0), TEXTO, ancho_nombre, 1);
                         pc.galley(Pos2::new(r.left(), r.bottom() + 12.0), g, TEXTO);
                     }
-                    let resp = ui.interact(r.intersect(clip), Id::unique(("ficha_i", fi, ci)), Sense::click());
+                    let resp = ui.interact(r.intersect(clip), Id::new(("ficha_i", fi, ci)), Sense::click());
                     if pc_modo && resp.hovered() && !foco_aqui {
                         resalte(&pc, r);
                     }
@@ -251,7 +251,7 @@ impl App {
                 }
                 let c = Pos2::new(if izq { pantalla.left() + 32.0 } else { pantalla.right() - 32.0 }, yc);
                 let r = Rect::from_center_size(c, Vec2::splat(44.0));
-                let resp = ui.interact(r, Id::unique(("flecha", izq)), Sense::click());
+                let resp = ui.interact(r, Id::new(("flecha", izq)), Sense::click());
                 p.circle_filled(c, 22.0, if resp.hovered() { FOCO } else { Color32::from_black_alpha(150) });
                 let color = if resp.hovered() { TINTA } else { TEXTO };
                 p.text(c - Vec2::new(0.0, 2.0), Align2::CENTER_CENTER, if izq { "‹" } else { "›" }, semi(30.0), color);
@@ -337,12 +337,12 @@ impl App {
         let valoracion = d
             .votos
             .filter(|(a, b)| a + b > 0)
-            .map(|(a, b)| format!("{:.0} % de valoraciones positivas", a as f64 * 100.0 / (a + b) as f64));
+            .map(|(a, b)| trf("{} % de valoraciones positivas", &[&format!("{:.0}", a as f64 * 100.0 / (a + b) as f64)]));
         let datos = [
-            Some(format!("{} jugando ahora", abreviar(d.jugando))),
-            Some(format!("{} visitas", abreviar(d.visitas))),
+            Some(trf("{} jugando ahora", &[&abreviar(d.jugando)])),
+            Some(trf("{} visitas", &[&abreviar(d.visitas)])),
             valoracion,
-            Some(format!("Servidores de {} jugadores", d.max_jugadores)),
+            Some(trf("Servidores de {} jugadores", &[&d.max_jugadores])),
         ];
         let mut x = x0;
         for t in datos.into_iter().flatten() {

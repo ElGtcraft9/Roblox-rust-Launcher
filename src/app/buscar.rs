@@ -26,10 +26,10 @@ impl App {
         let p = ui.painter().clone();
         let aviso = match &self.busqueda {
             Carga::Nada => Some(("Escribe el nombre de una experiencia y pulsa Enter.".to_string(), TEXTO_2)),
-            Carga::Cargando => Some((format!("Buscando «{}»", self.buscada), TEXTO_2)),
-            Carga::Error(e) => Some((format!("La búsqueda falló. {e}"), ERROR)),
+            Carga::Cargando => Some((trf("Buscando «{}»", &[&self.buscada]), TEXTO_2)),
+            Carga::Error(e) => Some((trf("La búsqueda falló. {}", &[e]), ERROR)),
             Carga::Listo(l) if l.is_empty() => Some((
-                format!("No hay experiencias que coincidan con «{}». Prueba con otras palabras.", self.buscada),
+                trf("No hay experiencias que coincidan con «{}». Prueba con otras palabras.", &[&self.buscada]),
                 TEXTO_2,
             )),
             Carga::Listo(_) => None,
@@ -75,7 +75,7 @@ impl App {
         let fila_foco = foco_i.map(|i| i / columnas).unwrap_or(0) as f32;
         let filas_visibles = (zona.height() / paso.y).floor().max(1.0);
         let objetivo = (fila_foco - filas_visibles + 1.0).max(0.0) * paso.y;
-        let off = ui.ctx().animate_value_with_time(Id::unique("busqueda_v"), objetivo, 0.18);
+        let off = ui.ctx().animate_value_with_time(Id::new("busqueda_v"), objetivo, 0.18);
         let pc = p.with_clip_rect(zona);
         let movido = raton_movido(ui, self.cfg.modo == Modo::Consola);
         let mut abrir = None;
@@ -93,7 +93,7 @@ impl App {
             }
             let g = galley(ui, &j.nombre, medio(escala::ETIQUETA), if enfocada { TEXTO } else { TEXTO_2 }, lado, 2);
             pc.galley(Pos2::new(r.left(), r.bottom() + 10.0), g, TEXTO);
-            let resp = ui.interact(r.intersect(zona), Id::unique(("busq", i)), Sense::click());
+            let resp = ui.interact(r.intersect(zona), Id::new(("busq", i)), Sense::click());
             if !enfocada && resp.hovered() {
                 resalte(&pc, r);
             }

@@ -5,6 +5,7 @@
 //! `Msg`, así que la interfaz solo se redibuja cuando algo cambia.
 
 use crate::acelerar;
+use crate::idioma::{self, Idioma, tr, trf};
 use crate::api::{self, Articulo, CATEGORIAS_MERCADO, Detalle, Juego, Seccion, TipoImg, Usuario};
 use crate::config::{self, AlJugar, ApiGrafica, Config, Modo};
 use crate::imagenes::{Img, Imagenes};
@@ -32,6 +33,7 @@ mod barras;
 mod buscar;
 mod campos;
 mod capas;
+mod crear;
 #[cfg(debug_assertions)]
 mod captura;
 mod dibujo;
@@ -79,6 +81,16 @@ pub enum Msg {
     Enviado(Result<(), String>),
     ChatAbierto(Result<(String, String), String>),
     Actualizacion(EstadoActualizacion),
+    Mako(EstadoMako),
+}
+
+/// Instalación de MAKO (generación de fotogramas en Sober, beta).
+#[derive(Clone, PartialEq)]
+pub enum EstadoMako {
+    Nada,
+    /// Porcentaje descargado.
+    Descargando(u8),
+    Error(String),
 }
 
 /// Estado de la actualización del propio launcher.
@@ -148,16 +160,18 @@ enum Pestana {
     Social,
     Perfil,
     Avatar,
+    Crear,
     Ajustes,
 }
 
-const PESTANAS: [(Pestana, &str); 7] = [
+const PESTANAS: [(Pestana, &str); 8] = [
     (Pestana::Inicio, "Inicio"),
     (Pestana::Buscar, "Buscar"),
     (Pestana::Mercado, "Mercado"),
     (Pestana::Social, "Social"),
     (Pestana::Perfil, "Perfil"),
     (Pestana::Avatar, "Avatar"),
+    (Pestana::Crear, "Crear"),
     (Pestana::Ajustes, "Ajustes"),
 ];
 
@@ -199,7 +213,16 @@ enum Ajuste {
     Geometria,
     Cielo,
     Dpi,
+    Escalado,
+    Optimizacion,
+    Smaa,
+    LimiteFps,
+    Mako,
+    FingirFps,
     Modo,
+    Idioma,
+    EscaladorEditor,
+    GenerarFotogramas,
     AlJugar,
     CerrarAlSalir,
     Precargar,
@@ -241,6 +264,7 @@ pub struct App {
     foco_desde: Option<(u64, Instant)>,
     precargado: bool,
     actualizacion: EstadoActualizacion,
+    mako: EstadoMako,
     ultima_busqueda: Option<Instant>,
     /// Transición entre pestañas: cuándo empezó y hacia qué lado.
     vista_anterior: (Pestana, bool),
@@ -280,6 +304,8 @@ pub struct App {
     fondo_error: Option<String>,
     lanzamiento: Option<Lanzamiento>,
     jugando: Arc<AtomicBool>,
+    /// La partida en curso lleva el texto de «fingir FPS» (solo Windows lo dibuja el launcher).
+    fingir_activo: bool,
     minimizado: bool,
     cerrar_tras_lanzar: bool,
     aviso_cliente: Option<String>,
@@ -326,6 +352,7 @@ pub struct App {
     foco_social: FocoSocial,
     arranque: Instant,
     fotogramas: u32,
+    taller: crear::Taller,
 }
 
 impl App {
@@ -339,11 +366,12 @@ impl App {
         crate::perfil::marca("ventana y GL listos (App::new)");
         aplicar(&cc.egui_ctx);
         crate::perfil::marca("fuentes y tema aplicados");
+        let mut cfg = Config::cargar();
+        idioma::fijar(cfg.idioma.unwrap_or_else(idioma::del_sistema));
         let (tx, rx) = channel();
         let tx = Enviador { tx, ctx: cc.egui_ctx.clone() };
         // Cliente y petición de portada se lanzaron antes de crear la ventana.
         let (http, portada) = rt.block_on(red).expect("arranque de red");
-        let mut cfg = Config::cargar();
 
         if cfg.abrir_enlaces_web.is_none() {
             let activar = plataforma::ENLACES_POR_DEFECTO;
@@ -375,6 +403,7 @@ impl App {
             foco_desde: None,
             precargado: false,
             actualizacion: EstadoActualizacion::Nada,
+            mako: EstadoMako::Nada,
             ultima_busqueda: None,
             vista_anterior: (Pestana::Inicio, false),
             cambio_vista: Instant::now() - Duration::from_secs(1),
@@ -405,6 +434,7 @@ impl App {
             fondo_error: None,
             lanzamiento: None,
             jugando: Arc::new(AtomicBool::new(false)),
+            fingir_activo: false,
             minimizado: false,
             cerrar_tras_lanzar: uri.is_some(),
             aviso_cliente: None,
@@ -445,6 +475,7 @@ impl App {
             foco_social: FocoSocial::Campo,
             arranque,
             fotogramas: 0,
+            taller: crear::Taller::default(),
             cfg,
         };
 
@@ -455,6 +486,11 @@ impl App {
                 tx.enviar(Msg::Inicio(r.map_err(texto_error)));
             });
         }
+        app.taller.render = cc.wgpu_render_state.clone();
+        {
+            use eframe::egui_wgpu::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+            app.taller.wayland = cc.window_handle().ok().map(|h| matches!(h.as_raw(), RawWindowHandle::Wayland(_)));
+        }
         app.comprobar_plataforma();
         app.abrir_sesion_guardada();
         mando::iniciar(app.tx.clone());
@@ -462,7 +498,12 @@ impl App {
             app.mantenimiento_en_fondo();
         }
         if let Some(uri) = uri {
-            app.lanzar("Abriendo la experiencia".into(), uri);
+            app.lanzar(tr("Abriendo la experiencia").into(), uri);
+        }
+        // Pruebas de rendimiento del editor: entra directamente en Crear.
+        if std::env::var_os("RUSTUDIO_EMBED_OPEN").is_some() {
+            app.pestana = Pestana::Crear;
+            app.taller.pedido = true;
         }
         #[cfg(debug_assertions)]
         app.preparar_captura();
@@ -549,6 +590,7 @@ impl App {
                 }
             }
             Pestana::Perfil => self.cargar_perfil(),
+            Pestana::Crear => self.taller.pedido = true,
             _ => {}
         }
     }
@@ -560,10 +602,49 @@ impl App {
     }
 }
 
+impl App {
+    /// «Fingir FPS» en Windows: una ventana transparente, siempre encima y sin
+    /// clics con el texto, mientras dura la partida. (En Linux lo dibuja el
+    /// overlay de gamescope.) No toca el proceso de Roblox.
+    fn overlay_fingir_fps(&self, ctx: &egui::Context) {
+        if plataforma::EFECTOS_SOBER || !self.fingir_activo || !self.jugando.load(Ordering::Relaxed) {
+            return;
+        }
+        let ventana = egui::ViewportBuilder::default()
+            .with_title("RustLauncher FPS")
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_taskbar(false)
+            .with_mouse_passthrough(true)
+            .with_always_on_top()
+            .with_position([12.0, 12.0])
+            .with_inner_size([200.0, 56.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fingir_fps"), ventana, |ui, _| {
+            ui.painter().text(
+                egui::pos2(4.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                "6767 FPS",
+                egui::FontId::proportional(36.0),
+                egui::Color32::from_rgb(120, 255, 120),
+            );
+        });
+    }
+}
+
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.entrada_taller(ctx, raw);
+    }
+
+    fn on_exit(&mut self) {
+        self.cerrar_taller();
+    }
+
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let t_fotograma = Instant::now();
         let ctx = ui.ctx().clone();
+        idioma::para_launcher();
+        self.overlay_fingir_fps(&ctx);
         if crate::perfil::activo() {
             if self.fotogramas == 0 {
                 crate::perfil::marca("primer fotograma (empieza)");
@@ -584,6 +665,18 @@ impl eframe::App for App {
         }
         #[cfg(debug_assertions)]
         self.capturar(&ctx);
+
+        // Pestaña Crear: el editor ocupa la ventana entera.
+        if std::mem::take(&mut self.taller.pedido) {
+            self.entrar_taller(&ctx);
+        }
+        if self.taller.activo {
+            // Lo que llegue del mando mientras tanto no se acumula para después.
+            self.acciones.clear();
+            self.mostrar_taller(ui, frame);
+            self.imgs.despachar();
+            return;
+        }
 
         self.aplicar_modo(&ctx);
         self.actualizar_solo(&ctx);
@@ -621,6 +714,8 @@ impl eframe::App for App {
                         Pestana::Perfil => self.pantalla_perfil(ui, vista),
                         Pestana::Avatar => self.pantalla_avatar(ui, vista),
                         Pestana::Ajustes => self.pantalla_ajustes(ui, vista, &acciones),
+                        // (al elegirla se abre el editor; este fotograma no dibuja nada)
+                        Pestana::Crear => {}
                     }
                 }
             });

@@ -135,6 +135,7 @@ impl App {
             }
             return;
         }
+        self.fingir_activo = self.cfg.cliente.fingir_fps && !uri.is_empty();
         let ajustes = self.cfg.cliente.clone();
         let cerrar_al_salir = self.cfg.cerrar_al_salir;
         let tx = self.tx.clone();
@@ -492,6 +493,14 @@ impl App {
                     self.inventario.insert(c, Carga::de(r));
                 }
                 Msg::Actualizacion(e) => self.actualizacion = e,
+                Msg::Mako(e) => {
+                    if matches!(e, EstadoMako::Error(_)) {
+                        // Sin MAKO instalado no tiene sentido dejarlo activado.
+                        self.cfg.cliente.mako = false;
+                        self.cfg.guardar();
+                    }
+                    self.mako = e;
+                }
                 Msg::Amigos(r) => self.amigos = Carga::de(r),
                 Msg::Descripcion(r) => self.descripcion = Carga::de(r),
                 Msg::CambioAvatar(r) => {
