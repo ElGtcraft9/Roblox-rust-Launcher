@@ -154,8 +154,9 @@ impl App {
             ),
             Ajuste::EscaladorEditor => (
                 "Escalado del editor".into(),
-                "Cómo se amplía la vista de la pestaña Crear. FSR 3.1 y FSR 2 usan varios fotogramas; FSR 1, uno solo. Cambiar a uno peor podría hacerte perder rendimiento o calidad.".into(),
+                "Cómo se amplía la vista de la pestaña Crear. «Ninguno» la dibuja a la resolución de la ventana; FSR 3.1 y FSR 2 usan varios fotogramas; FSR 1, uno solo.".into(),
                 match self.cfg.escalador {
+                    crate::config::EscaladorEditor::Ninguno => "Ninguno",
                     crate::config::EscaladorEditor::Fsr1 => "FSR 1",
                     crate::config::EscaladorEditor::Fsr2 => "FSR 2",
                     crate::config::EscaladorEditor::Fsr3 => "FSR 3.1",

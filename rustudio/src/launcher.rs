@@ -27,6 +27,7 @@ pub enum Request {
 pub fn set_escalado(modo: u8) {
     use rustudio_render::escalado::{Modo, set_modo};
     set_modo(match modo {
+        0 => Modo::Ninguno,
         1 => Modo::Fsr1,
         2 => Modo::Fsr2,
         _ => Modo::Fsr3,

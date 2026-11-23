@@ -70,9 +70,9 @@ impl OptimizacionSober {
 /// se amplía a la de la pantalla con FSR 1 (Linux: gamescope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Escalado {
+    #[default]
     Apagado,
     /// 77 % por lado (FSR «Ultra Quality»).
-    #[default]
     Calidad,
     /// 67 % (FSR «Quality»).
     Equilibrado,
@@ -175,17 +175,20 @@ pub struct Config {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EscaladorEditor {
+    /// Sin escalado: se dibuja a la resolución de la ventana.
+    #[default]
+    Ninguno,
     Fsr1,
     Fsr2,
-    #[default]
     Fsr3,
 }
 
 impl EscaladorEditor {
-    pub const TODOS: [EscaladorEditor; 3] = [EscaladorEditor::Fsr1, EscaladorEditor::Fsr2, EscaladorEditor::Fsr3];
+    pub const TODOS: [EscaladorEditor; 4] = [EscaladorEditor::Ninguno, EscaladorEditor::Fsr1, EscaladorEditor::Fsr2, EscaladorEditor::Fsr3];
 
     pub fn numero(self) -> u8 {
         match self {
+            EscaladorEditor::Ninguno => 0,
             EscaladorEditor::Fsr1 => 1,
             EscaladorEditor::Fsr2 => 2,
             EscaladorEditor::Fsr3 => 3,

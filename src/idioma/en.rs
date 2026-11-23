@@ -261,9 +261,10 @@ pub const TABLA: &[(&str, &str)] = &[
     ("Idioma", "Language"),
     ("Escalado del editor", "Editor upscaling"),
     (
-        "Cómo se amplía la vista de la pestaña Crear. FSR 3.1 y FSR 2 usan varios fotogramas; FSR 1, uno solo. Cambiar a uno peor podría hacerte perder rendimiento o calidad.",
-        "How the Create tab's view is scaled up. FSR 3.1 and FSR 2 use several frames; FSR 1 uses one. Switching to a worse one may cost performance or quality.",
+        "Cómo se amplía la vista de la pestaña Crear. «Ninguno» la dibuja a la resolución de la ventana; FSR 3.1 y FSR 2 usan varios fotogramas; FSR 1, uno solo.",
+        "How the Create tab's view is scaled up. \"None\" draws it at the window's resolution; FSR 3.1 and FSR 2 use several frames; FSR 1 uses one.",
     ),
+    ("Ninguno", "None"),
     ("Generar fotogramas en el editor (experimental)", "Frame generation in the editor (experimental)"),
     (
         "Intercala fotogramas calculados para ir más fluido. Puede notarse algo de retraso o deformación al mover la cámara.",

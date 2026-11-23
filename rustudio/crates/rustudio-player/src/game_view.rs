@@ -3302,6 +3302,10 @@ impl Game {
 /// 68 %, and the frame cheaper (Laser Tag, Play: 44 fps at 50 % against 35
 /// at 68 %).
 fn auto_render_scale(size: [u32; 2]) -> f32 {
+    // (RustLauncher) "Ninguno": no upscaling, so the full resolution.
+    if rustudio_render::escalado::modo() == rustudio_render::escalado::Modo::Ninguno {
+        return 1.0;
+    }
     let budget: f32 = if rustudio_render::escalado::temporal() { 350_000.0 } else { 500_000.0 };
     let pixels = size[0] as f32 * size[1] as f32;
     if pixels <= budget {

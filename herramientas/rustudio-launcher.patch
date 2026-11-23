@@ -1,5 +1,5 @@
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-core/src/rustudio_settings.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-core/src/rustudio_settings.rs
---- a/crates/rustudio-core/src/rustudio_settings.rs	2026-11-22 12:53:46.275000794 -0600
+--- a/crates/rustudio-core/src/rustudio_settings.rs	2026-11-22 19:01:56.343686133 -0600
 +++ b/crates/rustudio-core/src/rustudio_settings.rs	2026-11-21 19:53:52.279864007 -0600
 @@ -77,7 +77,7 @@
  
@@ -26,7 +26,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-core/src/rust
  
  pub fn performance_choice(key: &str) -> usize {
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/game.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-player/src/game.rs
---- a/crates/rustudio-player/src/game.rs	2026-11-22 12:53:46.951771411 -0600
+--- a/crates/rustudio-player/src/game.rs	2026-11-22 19:01:56.839683516 -0600
 +++ b/crates/rustudio-player/src/game.rs	2026-11-21 19:53:52.272088573 -0600
 @@ -127,6 +127,10 @@
      /// (camera aspect from it; drawn scaled into the panel): self-test
@@ -48,8 +48,8 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/ga
      }
  }
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/game_view.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-player/src/game_view.rs
---- a/crates/rustudio-player/src/game_view.rs	2026-11-22 12:53:46.952771411 -0600
-+++ b/crates/rustudio-player/src/game_view.rs	2026-11-22 12:27:12.356215270 -0600
+--- a/crates/rustudio-player/src/game_view.rs	2026-11-22 19:01:56.839683516 -0600
++++ b/crates/rustudio-player/src/game_view.rs	2026-11-22 18:57:00.139418432 -0600
 @@ -1999,7 +1999,7 @@
          self.sync_terrain_grass();
          // Decoration sways in Edit mode too, even when input is idle.
@@ -192,7 +192,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/ga
          fl.globals.lightocc = if voxel_lights { [0.0; 4] } else {
              let _s = rustudio_core::bench::scope("lt_occ");
              self.sync_lightocc(&lights)
-@@ -3217,3 +3289,42 @@
+@@ -3217,3 +3289,46 @@
          self.game_viewport(ui, rect, &resp, gui_took);
      }
  }
@@ -209,6 +209,10 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/ga
 +/// 68 %, and the frame cheaper (Laser Tag, Play: 44 fps at 50 % against 35
 +/// at 68 %).
 +fn auto_render_scale(size: [u32; 2]) -> f32 {
++    // (RustLauncher) "Ninguno": no upscaling, so the full resolution.
++    if rustudio_render::escalado::modo() == rustudio_render::escalado::Modo::Ninguno {
++        return 1.0;
++    }
 +    let budget: f32 = if rustudio_render::escalado::temporal() { 350_000.0 } else { 500_000.0 };
 +    let pixels = size[0] as f32 * size[1] as f32;
 +    if pixels <= budget {
@@ -237,24 +241,26 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-player/src/ga
 +}
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/escalado.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/escalado.rs
 --- a/crates/rustudio-render/src/escalado.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/crates/rustudio-render/src/escalado.rs	2026-11-22 12:37:21.345669314 -0600
-@@ -0,0 +1,61 @@
++++ b/crates/rustudio-render/src/escalado.rs	2026-11-22 18:56:55.877428285 -0600
+@@ -0,0 +1,65 @@
 +//! (RustLauncher) Which upscaler the view uses (Settings > Escalado del
 +//! editor): FSR 1 (spatial, finish.rs), FSR 2 (fsr2.rs) or FSR 3.1
 +//! (fsr3.rs), both temporal; and whether frames are generated (generar.rs).
-+//! For tests and benches: RUSTUDIO_ESCALADO=1|2|3 and RUSTUDIO_GENERAR=1.
++//! For tests and benches: RUSTUDIO_ESCALADO=0|1|2|3 and RUSTUDIO_GENERAR=1.
 +
 +use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 +
 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 +pub enum Modo {
++    /// No upscaling: the view draws at the window's resolution.
++    Ninguno,
 +    Fsr1,
 +    Fsr2,
 +    Fsr3,
 +}
 +
-+/// 1, 2 or 3 (FSR 1, 2, 3.1).
-+static MODO: AtomicU8 = AtomicU8::new(3);
++/// 0 (none), 1, 2 or 3 (FSR 1, 2, 3.1).
++static MODO: AtomicU8 = AtomicU8::new(0);
 +static GENERAR: AtomicBool = AtomicBool::new(false);
 +
 +fn entorno() -> &'static (Option<u8>, bool) {
@@ -270,6 +276,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/es
 +pub fn set_modo(m: Modo) {
 +    MODO.store(
 +        match m {
++            Modo::Ninguno => 0,
 +            Modo::Fsr1 => 1,
 +            Modo::Fsr2 => 2,
 +            Modo::Fsr3 => 3,
@@ -280,6 +287,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/es
 +
 +pub fn modo() -> Modo {
 +    match entorno().0.unwrap_or_else(|| MODO.load(Ordering::Relaxed)) {
++        0 => Modo::Ninguno,
 +        1 => Modo::Fsr1,
 +        2 => Modo::Fsr2,
 +        _ => Modo::Fsr3,
@@ -289,7 +297,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/es
 +/// Whether the temporal upscalers (FSR 2 and 3.1) are in use: the view then
 +/// draws with a jitter and hands its camera motion over.
 +pub fn temporal() -> bool {
-+    modo() != Modo::Fsr1
++    matches!(modo(), Modo::Fsr2 | Modo::Fsr3)
 +}
 +
 +/// Frame generation (experimental, off by default).
@@ -2934,7 +2942,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/ge
 +    }
 +}
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/lib.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/lib.rs
---- a/crates/rustudio-render/src/lib.rs	2026-11-22 12:53:46.955771410 -0600
+--- a/crates/rustudio-render/src/lib.rs	2026-11-22 19:01:56.842683500 -0600
 +++ b/crates/rustudio-render/src/lib.rs	2026-11-22 12:27:03.497018859 -0600
 @@ -25,6 +25,11 @@
  pub mod wrap;
@@ -2949,7 +2957,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/li
  pub mod matpack;
  pub mod grass_temporal;
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/quality.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/quality.rs
---- a/crates/rustudio-render/src/quality.rs	2026-11-22 12:53:46.955771410 -0600
+--- a/crates/rustudio-render/src/quality.rs	2026-11-22 19:01:56.842683500 -0600
 +++ b/crates/rustudio-render/src/quality.rs	2026-11-21 20:34:39.247510716 -0600
 @@ -18,6 +18,31 @@
      0, 0, 0, 0, 0, 0, 1, 2, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17,
@@ -3019,7 +3027,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/qu
              self.step(true, false);
          }
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/render.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/render.rs
---- a/crates/rustudio-render/src/render.rs	2026-11-22 12:53:46.957771409 -0600
+--- a/crates/rustudio-render/src/render.rs	2026-11-22 19:01:56.844683489 -0600
 +++ b/crates/rustudio-render/src/render.rs	2026-11-22 12:42:37.126793142 -0600
 @@ -1517,6 +1517,16 @@
      }
@@ -3257,7 +3265,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/re
              samples = 1;
          }
 diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/shader.wgsl /home/gt/Documentos/RustLauncher/codigo/rustudio/crates/rustudio-render/src/shader.wgsl
---- a/crates/rustudio-render/src/shader.wgsl	2026-11-22 12:53:46.958771409 -0600
+--- a/crates/rustudio-render/src/shader.wgsl	2026-11-22 19:01:56.844683489 -0600
 +++ b/crates/rustudio-render/src/shader.wgsl	2026-11-21 19:35:04.606683106 -0600
 @@ -820,7 +820,9 @@
          }
@@ -3281,8 +3289,8 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/crates/rustudio-render/src/sh
  
 diff -ruN '--exclude=target' '--exclude=.git' repo/src/launcher.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/launcher.rs
 --- a/src/launcher.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/launcher.rs	2026-11-22 12:20:00.320649393 -0600
-@@ -0,0 +1,180 @@
++++ b/src/launcher.rs	2026-11-22 18:56:55.877719089 -0600
+@@ -0,0 +1,181 @@
 +//! rustudio dentro de RustLauncher (pestaña Crear).
 +//!
 +//! El launcher crea el editor con [`embedded`] sobre su propia ventana y su
@@ -3312,6 +3320,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/src/launcher.rs /home/gt/Docu
 +pub fn set_escalado(modo: u8) {
 +    use rustudio_render::escalado::{Modo, set_modo};
 +    set_modo(match modo {
++        0 => Modo::Ninguno,
 +        1 => Modo::Fsr1,
 +        2 => Modo::Fsr2,
 +        _ => Modo::Fsr3,
@@ -3464,7 +3473,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/src/launcher.rs /home/gt/Docu
 +    }
 +}
 diff -ruN '--exclude=target' '--exclude=.git' repo/src/lib.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/lib.rs
---- a/src/lib.rs	2026-11-22 12:53:46.961771408 -0600
+--- a/src/lib.rs	2026-11-22 19:01:56.846683479 -0600
 +++ b/src/lib.rs	2026-11-21 11:01:47.251726794 -0600
 @@ -29,6 +29,7 @@
  pub mod cloud_ui;
@@ -3475,7 +3484,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/src/lib.rs /home/gt/Documento
  pub use rustudio_player::{account, asset_report, emote_wheel, game, game_view, keys, offscreen, run_harness, player_app, play};
  pub mod frame_watchdog;
 diff -ruN '--exclude=target' '--exclude=.git' repo/src/start_page.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/start_page.rs
---- a/src/start_page.rs	2026-11-22 12:53:46.962771407 -0600
+--- a/src/start_page.rs	2026-11-22 19:01:56.847683473 -0600
 +++ b/src/start_page.rs	2026-11-21 11:01:47.251798097 -0600
 @@ -451,6 +451,21 @@
              crate::icons::logo(ui, 26.0);
@@ -3500,7 +3509,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/src/start_page.rs /home/gt/Do
                  let label = if self.game.account.signed_in() {
                      self.game.account.status_short().trim_start_matches("Roblox: ").to_string()
 diff -ruN '--exclude=target' '--exclude=.git' repo/src/studio_actions.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/src/studio_actions.rs
---- a/src/studio_actions.rs	2026-11-22 12:53:46.963771407 -0600
+--- a/src/studio_actions.rs	2026-11-22 19:01:56.847683473 -0600
 +++ b/src/studio_actions.rs	2026-11-21 11:01:47.251850535 -0600
 @@ -45,7 +45,7 @@
  /// A menu's shortcut column and width, from its longest label and shortcut.
@@ -3553,7 +3562,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/src/studio_actions.rs /home/g
          let (col, w) = menu_metrics(ui, items);
          ui.set_width(w);
 diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/context.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/context.rs
---- a/vendor/egui/src/context.rs	2026-11-22 12:53:46.470771594 -0600
+--- a/vendor/egui/src/context.rs	2026-11-22 19:01:56.488685368 -0600
 +++ b/vendor/egui/src/context.rs	2026-11-21 11:01:47.251850535 -0600
 @@ -773,6 +773,16 @@
      }
@@ -3588,7 +3597,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/context.rs /h
          let update_fonts = self.read(|ctx| {
              // NOTE: this comparison is expensive since it checks TTF data for equality
 diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/lib.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/lib.rs
---- a/vendor/egui/src/lib.rs	2026-11-22 12:53:46.474017401 -0600
+--- a/vendor/egui/src/lib.rs	2026-11-22 19:01:56.490800284 -0600
 +++ b/vendor/egui/src/lib.rs	2026-11-21 11:01:47.252008261 -0600
 @@ -462,7 +462,7 @@
  pub use self::{
@@ -3600,7 +3609,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/lib.rs /home/
          Key, UserData,
          input::*,
 diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/painter.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/painter.rs
---- a/vendor/egui/src/painter.rs	2026-11-22 12:53:46.475007804 -0600
+--- a/vendor/egui/src/painter.rs	2026-11-22 19:01:56.491524901 -0600
 +++ b/vendor/egui/src/painter.rs	2026-11-21 11:01:47.252063304 -0600
 @@ -492,7 +492,7 @@
          color: crate::Color32,
@@ -3621,7 +3630,7 @@ diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/painter.rs /h
  
      /// Lay out this text layut job in a galley.
 diff -ruN '--exclude=target' '--exclude=.git' repo/vendor/egui/src/widget_text.rs /home/gt/Documentos/RustLauncher/codigo/rustudio/vendor/egui/src/widget_text.rs
---- a/vendor/egui/src/widget_text.rs	2026-11-22 12:53:46.476761275 -0600
+--- a/vendor/egui/src/widget_text.rs	2026-11-22 19:01:56.493282060 -0600
 +++ b/vendor/egui/src/widget_text.rs	2026-11-21 11:01:47.252108118 -0600
 @@ -67,6 +67,35 @@
      }
